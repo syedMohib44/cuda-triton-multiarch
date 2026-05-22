@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+dist/
+build/
+.ipynb_checkpoints/
+.claude/
+*.so
+*.profraw
+*.sh
+
+# Nsight profiling artifacts
+profiles/
+*.ncu-rep
+*.nsys-rep
+*.qdrep
+*.qdstrm
+
+# CUTLASS submodule (cloned via `make fetch-cutlass`)
+third_party/
+
+.vscode/
