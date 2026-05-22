@@ -697,6 +697,27 @@ class TestCUDAFlashAttention:
 
         torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
 
+    @pytest.mark.parametrize("batch,heads,seqlen,head_dim", [
+        (1, 4, 128, 64),
+        (2, 4, 256, 64),
+        (1, 1, 128, 128),
+        (2, 4, 256, 128),
+    ])
+    def test_causal(self, batch, heads, seqlen, head_dim):
+        """Causal masking: output must match SDPA with is_causal=True."""
+        torch.manual_seed(42)
+        q = torch.randn(batch, seqlen, heads, head_dim, device="cuda", dtype=torch.float16)
+        k = torch.randn(batch, seqlen, heads, head_dim, device="cuda", dtype=torch.float16)
+        v = torch.randn(batch, seqlen, heads, head_dim, device="cuda", dtype=torch.float16)
+
+        out, _lse = flash_attn_cuda.mha_fwd(q, k, v, True)
+
+        ref = torch.nn.functional.scaled_dot_product_attention(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True
+        ).transpose(1, 2)
+
+        torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+
     def test_output_shape(self):
         torch.manual_seed(0)
         q = torch.randn(2, 256, 4, 64, device="cuda", dtype=torch.float16)
@@ -749,6 +770,43 @@ class TestCUTLASSFlashAttention:
             q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=False
         ).transpose(1, 2)
 
+        torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+
+    @pytest.mark.parametrize("batch,heads,seqlen,head_dim", [
+        (1, 4, 128, 64),
+        (2, 4, 256, 64),
+        (1, 1, 128, 128),
+        (2, 4, 256, 128),
+        # longer sequences stress the diagonal-tile masking logic
+        (1, 2, 512, 64),
+        (1, 2, 512, 128),
+    ])
+    def test_causal(self, batch, heads, seqlen, head_dim):
+        """Causal masking: output must match SDPA with is_causal=True."""
+        torch.manual_seed(42)
+        q = torch.randn(batch, seqlen, heads, head_dim, device="cuda", dtype=torch.float16)
+        k = torch.randn(batch, seqlen, heads, head_dim, device="cuda", dtype=torch.float16)
+        v = torch.randn(batch, seqlen, heads, head_dim, device="cuda", dtype=torch.float16)
+
+        out, _lse = flash_attn_cutlass.mha_fwd(q, k, v, True)
+
+        ref = torch.nn.functional.scaled_dot_product_attention(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True
+        ).transpose(1, 2)
+
+        torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+
+    @pytest.mark.parametrize("head_dim", [32, 64, 128])
+    def test_head_dim_32(self, head_dim):
+        """head_dim=32 is supported by CuTe but not WMMA."""
+        torch.manual_seed(0)
+        q = torch.randn(2, 256, 4, head_dim, device="cuda", dtype=torch.float16)
+        k = torch.randn(2, 256, 4, head_dim, device="cuda", dtype=torch.float16)
+        v = torch.randn(2, 256, 4, head_dim, device="cuda", dtype=torch.float16)
+        out, _lse = flash_attn_cutlass.mha_fwd(q, k, v, False)
+        ref = torch.nn.functional.scaled_dot_product_attention(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=False
+        ).transpose(1, 2)
         torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
 
     def test_output_shape(self):
