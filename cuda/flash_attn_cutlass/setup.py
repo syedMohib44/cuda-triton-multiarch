@@ -13,6 +13,9 @@ Build:
 import os
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from arch_utils import get_gencode_flags
+
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
@@ -55,11 +58,7 @@ setup(
                 "nvcc": [
                     "-O3",
                     "--use_fast_math",
-                    # Multi-arch: SM75 (T4/Turing), SM80 (A100), SM86 (RTX 30xx), SM89 (RTX 40xx)
-                    "-gencode", "arch=compute_75,code=sm_75",
-                    "-gencode", "arch=compute_80,code=sm_80",
-                    "-gencode", "arch=compute_86,code=sm_86",
-                    "-gencode", "arch=compute_89,code=sm_89",
+                    *get_gencode_flags("flash_attn_cutlass"),
                     "-std=c++17",
                     "--expt-relaxed-constexpr",
                     "--expt-extended-lambda",

@@ -1,13 +1,11 @@
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from arch_utils import get_gencode_flags
+
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
-# Multi-arch: SM75 (Turing/T4), SM80 (A100), SM86 (RTX 30xx/A10), SM89 (RTX 40xx/L40S)
-GENCODE_FLAGS = [
-    "-gencode", "arch=compute_75,code=sm_75",
-    "-gencode", "arch=compute_80,code=sm_80",
-    "-gencode", "arch=compute_86,code=sm_86",
-    "-gencode", "arch=compute_89,code=sm_89",
-]
+GENCODE_FLAGS = get_gencode_flags("cuda_kernels")
 
 setup(
     name="cuda_kernels",

@@ -1,6 +1,8 @@
 # Triton + CUDA GPU Kernels
 
-Triton and CUDA kernels for transformer operations — RMSNorm, SwiGLU, softmax, FlashAttention-2, fp16 / int8 / int4 matmul — with PyTorch reference implementations, parametrized correctness tests, and A100 benchmarks.
+Triton and CUDA kernels for transformer operations — RMSNorm, SwiGLU, softmax, FlashAttention-2, fp16 / int8 / int4 matmul — with PyTorch reference implementations, parametrized correctness tests, and multi-GPU benchmarks.
+
+Supports **SM75 (Turing / T4, RTX 20xx)**, **SM80 (A100)**, **SM86 (RTX 30xx / A10)**, **SM89 (RTX 40xx / L40S)**. GPU is auto-detected at build and runtime — no manual configuration needed.
 
 > **Blog post:** [**FlashAttention, but the Actual Details**](https://blog.echen.io/p/flashattention-2-in-cute-from-scratch/) — line-by-line walkthrough of the CuTe FA2 implementation in [`cuda/flash_attn_cutlass/`](cuda/flash_attn_cutlass/), covering swizzling, tiled MMAs, online softmax, the V-copy + transpose, and at least one finding about an unused line in Tri Dao's source. The companion `scratch/` directory has standalone runnable demos for each concept ([scratch README](scratch/README.md)).
 
@@ -202,13 +204,90 @@ pip install -r requirements.txt   # triton, ninja, pytest, numpy
 # CUDA 12.x: drop the --index-url and use the default PyTorch wheels.
 ```
 
-## Usage
+## GPU auto-detection
+
+The build system detects your GPU automatically — no manual architecture flags needed.
 
 ```bash
-# Tests
-python -m pytest tests/test_kernels.py -v
+# See what GPU was detected and which block sizes will be used
+python gpu_utils.py
+```
 
-# Triton benchmarks
+Example output on an RTX 3070:
+```
+[0] NVIDIA GeForce RTX 3070
+     SM86  |  max_smem=100 KB  |  cp.async=yes  |  fp16 peak=142 TFLOPS  |  supported=yes
+     Optimal blocks: hdim64→(128,64)  hdim128→(128,32)
+```
+
+`setup.py` reads this at build time and compiles only for the detected SM, making builds faster. To override (e.g. for CI or cross-compilation):
+
+```bash
+TORCH_CUDA_ARCH_LIST="8.0 8.6" make build-fac
+```
+
+## Testing
+
+### Step 1 — Triton kernels (no build required)
+
+Triton compiles JIT on first run. No setup needed beyond `pip install -r requirements.txt`.
+
+```bash
+# All Triton kernel correctness tests
+make test-triton
+
+# Or run individual kernel tests by name
+python -m pytest tests/test_kernels.py -v -k "RMSNorm"
+python -m pytest tests/test_kernels.py -v -k "SwiGLU"
+python -m pytest tests/test_kernels.py -v -k "Softmax"
+python -m pytest tests/test_kernels.py -v -k "FlashAttention"   # Triton FA2 (causal + non-causal)
+python -m pytest tests/test_kernels.py -v -k "Quantization"
+```
+
+### Step 2 — CUDA softmax extension
+
+```bash
+make build-cuda        # auto-detects GPU, compiles for your SM
+make test-cuda         # runs CUDA softmax correctness tests
+```
+
+### Step 3 — WMMA FlashAttention
+
+```bash
+make build-fac         # auto-detects GPU
+make test-fac          # non-causal + causal correctness vs PyTorch SDPA
+```
+
+Tests cover:
+- Non-causal multi-head, hdim=64 and hdim=128
+- **Causal masking** — output compared against `scaled_dot_product_attention(is_causal=True)`
+- Output shape and LSE shape
+
+### Step 4 — CuTe/CUTLASS FlashAttention
+
+```bash
+make fetch-cutlass          # clone CUTLASS v3.6.0 once into third_party/
+make build-fac-cutlass      # auto-detects GPU
+make test-fac-cutlass       # non-causal + causal + hdim=32
+```
+
+Tests cover:
+- Non-causal, hdim=32/64/128
+- **Causal masking** — including long sequences (512) that stress the diagonal-tile masking logic
+- Output shape
+
+### Run everything
+
+```bash
+make test              # all tests: Triton + CUDA softmax + WMMA FA2 + CuTe FA2
+```
+
+Expected output: all tests pass with `atol=1e-2` tolerance against PyTorch SDPA.
+
+## Benchmarks
+
+```bash
+# Triton
 python benchmarks/bench_rmsnorm.py
 python benchmarks/bench_swiglu.py
 python benchmarks/bench_softmax.py
@@ -218,20 +297,28 @@ python benchmarks/bench_flash_attention_full.py
 python benchmarks/bench_fused.py
 python benchmarks/bench_quantized_matmul.py
 
-# CUDA softmax
-make build-cuda
+# CUDA (requires make build-cuda)
 make bench-cuda-softmax
 
-# WMMA FlashAttention
-make build-fac
-make test-fac
+# WMMA FlashAttention (requires make build-fac)
 make bench-fac
 
-# CuTe FlashAttention (CUTLASS 3.x). Requires CUTLASS headers — fetch once.
-make fetch-cutlass         # clones v3.6.0 into third_party/cutlass
-make build-fac-cutlass
-make test-fac-cutlass
-make bench-fac-cutlass
+# CuTe FlashAttention (requires make build-fac-cutlass)
+make bench-fac-cutlass    # reports TFLOP/s and % of your GPU's fp16 peak
+```
+
+### Profiling (Nsight Compute)
+
+```bash
+# Quick Speed-of-Light + occupancy
+make prof-fac seq=2048
+
+# Full stall-reason breakdown (slower, ~10×)
+make prof-fac-full seq=2048
+
+# GUI-loadable .ncu-rep file
+make prof-fac-rep seq=2048
+# Open with: ncu-ui profiles/prof_seq2048.ncu-rep
 ```
 
 ## Quantized matmul correctness
@@ -261,5 +348,11 @@ pytest tests/test_kernels.py -k "Quantization" -v
 - Triton 2.0+ (currently 3.6)
 - Ninja (incremental builds with header dependency tracking)
 - pytest
-- NVIDIA GPU (benchmarked on A100 80GB)
 - CUDA Toolkit 12.x or 13.x (currently 13.0)
+- NVIDIA GPU — supported architectures:
+  | SM | GPU examples | Notes |
+  |----|-------------|-------|
+  | SM75 | T4, RTX 2080 Ti | No cp.async; smaller tiles |
+  | SM80 | A100, A30 | Full config; benchmarks in this README |
+  | SM86 | RTX 3090, RTX 3070, A10 | 100 KB smem; hdim128 uses narrower BLOCK_N |
+  | SM89 | RTX 4090, L40S | Same as SM86 |
