@@ -14,14 +14,16 @@ import os
 import warnings
 
 # All SM versions this project has kernels for.
-SUPPORTED_SMS = [75, 80, 86, 89]
+SUPPORTED_SMS = [75, 80, 86, 89, 90, 120]
 
 # Human-readable names for print output.
 _SM_NAMES = {
-    75: "Turing (T4 / RTX 20xx)",
-    80: "Ampere A100",
-    86: "Ampere (RTX 30xx / A10)",
-    89: "Ada (RTX 40xx / L40S)",
+    75:  "Turing (T4 / RTX 20xx)",
+    80:  "Ampere A100",
+    86:  "Ampere (RTX 30xx / A10)",
+    89:  "Ada (RTX 40xx / L40S)",
+    90:  "Hopper (H100)",
+    120: "Blackwell (RTX 50xx)",
 }
 
 

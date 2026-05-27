@@ -39,10 +39,8 @@ std::vector<torch::Tensor> mha_fwd(
         cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
         cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
         int sm = major * 10 + minor;
-        TORCH_CHECK(sm == 75 || (sm >= 80 && sm <= 89),
-            "GPU SM", sm, " not supported. Supported: SM75 (Turing), "
-            "SM80 (A100), SM86 (RTX 30xx/A10), SM89 (RTX 40xx/L40S). "
-            "H100 (SM90) requires a separate kernel.");
+        TORCH_CHECK(sm == 75 || sm >= 80,
+            "GPU SM", sm, " not supported. Need SM75 (Turing) or SM80+ (Ampere/Ada/Hopper/Blackwell).");
     }
 
     const int batch_size = q.size(0);

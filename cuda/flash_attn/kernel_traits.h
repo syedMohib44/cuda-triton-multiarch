@@ -105,13 +105,17 @@ struct Flash_fwd_kernel_traits {
 // ---------------------------------------------------------------------------
 
 // SM75 (Turing: T4, RTX 2080 Ti) — 64 KB smem, no cp.async
-using Traits_hdim64_sm75  = Flash_fwd_kernel_traits<64,   64, 32, 4>;
-using Traits_hdim128_sm75 = Flash_fwd_kernel_traits<128,  64, 32, 4>;
+// WARPS=2 → NTHREADS=64 == BLOCK_M (required by static_assert in flash_fwd_kernel.h)
+using Traits_hdim64_sm75  = Flash_fwd_kernel_traits<64,   64, 32, 2>;
+using Traits_hdim128_sm75 = Flash_fwd_kernel_traits<128,  64, 32, 2>;
 
 // SM80 (A100/A30) — 164 KB smem, cp.async available
 using Traits_hdim64  = Flash_fwd_kernel_traits<64,  128, 64, 4>;
 using Traits_hdim128 = Flash_fwd_kernel_traits<128, 128, 64, 4>;
 
-// SM86 (RTX 3090, A10) and SM89 (RTX 4090, L40S) — 100 KB smem, cp.async available
-using Traits_hdim64_sm86  = Flash_fwd_kernel_traits<64,  128, 64, 4>;  // 80 KB — fits
-using Traits_hdim128_sm86 = Flash_fwd_kernel_traits<128, 128, 32, 4>;  // ~70 KB — fits
+// SM86 (RTX 3090, A10), SM89 (RTX 4090, L40S), SM120 (RTX 50xx) — 100 KB smem max
+// hdim64:  BLOCK_M=128, BLOCK_N=64, NWARPS=4  → kSmemSizePipeline ≈ 80 KB ✓
+// hdim128: BLOCK_M=64,  BLOCK_N=32, NWARPS=2  → kSmemSizePipeline ≈ 72 KB ✓
+//   (BLOCK_M=128 with BLOCK_N=32 gives 130 KB — exceeds 100 KB limit!)
+using Traits_hdim64_sm86  = Flash_fwd_kernel_traits<64,  128, 64, 4>;
+using Traits_hdim128_sm86 = Flash_fwd_kernel_traits<128,  64, 32, 2>;

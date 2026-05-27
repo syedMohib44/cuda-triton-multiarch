@@ -7,11 +7,12 @@ Single source of truth used by:
   - Benchmarks      (accurate peak TFLOPS reference)
 
 Supported SM versions:
-  SM75  — Turing  (T4, RTX 2080 Ti)      : 64 KB smem, no cp.async
-  SM80  — Ampere  (A100, A30)             : 164 KB smem, cp.async
-  SM86  — Ampere  (RTX 3090, A10)         : 100 KB smem, cp.async
-  SM89  — Ada     (RTX 4090, L40S)        : 100 KB smem, cp.async
-  SM90  — Hopper  (H100)                  : NOT supported (needs wgmma/TMA)
+  SM75  — Turing   (T4, RTX 2080 Ti)      : 64 KB smem, no cp.async
+  SM80  — Ampere   (A100, A30)             : 164 KB smem, cp.async
+  SM86  — Ampere   (RTX 3090, A10)         : 100 KB smem, cp.async
+  SM89  — Ada      (RTX 4090, L40S)        : 100 KB smem, cp.async
+  SM90  — Hopper   (H100)                  : 228 KB smem, cp.async
+  SM120 — Blackwell (RTX 5070/5090)        : 228 KB smem, cp.async
 """
 
 from __future__ import annotations
@@ -28,27 +29,33 @@ import torch
 # SM86: 100 KB max (RTX 30 series Ampere)
 # SM89: 100 KB max (Ada Lovelace)
 _MAX_SMEM = {
-    75: 64 * 1024,
-    80: 164 * 1024,
-    86: 100 * 1024,
-    89: 100 * 1024,
+    75:  64  * 1024,
+    80:  164 * 1024,
+    86:  100 * 1024,
+    89:  100 * 1024,
+    90:  228 * 1024,
+    120: 228 * 1024,
 }
 
 # fp16 tensor-core peak (TFLOPs, dense, no sparsity).
 # Source: NVIDIA product specs / GPU white papers.
 _FP16_PEAK_TFLOPS = {
-    75: 65.0,    # T4 65 TFLOPS, RTX 2080 Ti ~107 TFLOPS (use T4 as conservative)
-    80: 312.0,   # A100 SXM4 80 GB
-    86: 142.0,   # RTX 3090 (35.6 TFLOPS FP32 × 2 for tensor = ~71; with sparsity 142)
-    89: 330.0,   # RTX 4090 (82.6 TFLOPS FP32 × 4 = ~330 dense tensor)
+    75:  65.0,   # T4 65 TFLOPS, RTX 2080 Ti ~107 TFLOPS (use T4 as conservative)
+    80:  312.0,  # A100 SXM4 80 GB
+    86:  142.0,  # RTX 3090 (35.6 TFLOPS FP32 × 2 for tensor = ~71; with sparsity 142)
+    89:  330.0,  # RTX 4090 (82.6 TFLOPS FP32 × 4 = ~330 dense tensor)
+    90:  494.0,  # H100 SXM5 (dense FP16 tensor core)
+    120: 145.0,  # RTX 5070 (estimated; varies by model)
 }
 
 # Whether cp.async is available (SM80+).
 _HAS_CP_ASYNC = {
-    75: False,
-    80: True,
-    86: True,
-    89: True,
+    75:  False,
+    80:  True,
+    86:  True,
+    89:  True,
+    90:  True,
+    120: True,
 }
 
 # (BLOCK_Q, BLOCK_KV) defaults per (sm, head_dim).
@@ -65,10 +72,12 @@ _HAS_CP_ASYNC = {
 # SM86 (100 KB): hdim64→(128,64)≈79 KB hdim128→(128,32)≈79 KB  (reduce BLOCK_KV)
 # SM89 (100 KB): same as SM86
 _BLOCK_SIZES: dict[int, dict[int, tuple[int, int]]] = {
-    75: {32: (64, 32), 64: (64, 32), 128: (64, 32)},
-    80: {32: (128, 64), 64: (128, 64), 128: (128, 64)},
-    86: {32: (128, 64), 64: (128, 64), 128: (128, 32)},
-    89: {32: (128, 64), 64: (128, 64), 128: (128, 32)},
+    75:  {32: (64, 32),  64: (64, 32),  128: (64, 32)},
+    80:  {32: (128, 64), 64: (128, 64), 128: (128, 64)},
+    86:  {32: (128, 64), 64: (128, 64), 128: (128, 32)},
+    89:  {32: (128, 64), 64: (128, 64), 128: (128, 32)},
+    90:  {32: (128, 64), 64: (128, 64), 128: (128, 64)},
+    120: {32: (128, 64), 64: (128, 64), 128: (128, 64)},
 }
 
 # ---------------------------------------------------------------------------
@@ -134,8 +143,8 @@ def check_gpu_support(raise_on_unsupported: bool = True) -> dict:
     if not info["supported"]:
         msg = (
             f"GPU '{info['name']}' (SM{info['sm_version']}) is not supported.\n"
-            f"Supported: SM75 (Turing), SM80 (A100), SM86 (Ampere), SM89 (Ada).\n"
-            f"SM90 (H100) support requires TMA/wgmma — not yet implemented."
+            f"Supported: SM75 (Turing), SM80 (A100), SM86/89 (Ampere/Ada), "
+            f"SM90 (Hopper), SM120 (Blackwell)."
         )
         if raise_on_unsupported:
             raise RuntimeError(msg)

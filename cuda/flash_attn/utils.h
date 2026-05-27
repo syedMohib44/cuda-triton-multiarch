@@ -104,6 +104,11 @@ template <int N> __device__ __forceinline__ void cp_async_wait() {
 //     }
 // }
 
+// Forward declaration so load_tile_async's #else fallback can reference it.
+template <int rows, int cols, int smem_stride, int kNThreads>
+__device__ void load_tile_sync(half *smem, const half *gmem, int row_stride,
+                               int valid_rows, int tid);
+
 // ============================================================================
 // Async tile load (SM80+ cp.async, Phase 2)
 // ============================================================================

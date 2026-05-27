@@ -13,10 +13,25 @@
 #include "flash_fwd_kernel.h"
 #include "kernel_traits.h"
 
+inline int current_sm_version() {
+    int device;
+    cudaGetDevice(&device);
+    int major, minor;
+    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
+    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
+    return major * 10 + minor;
+}
+
 template <typename Traits, bool Is_causal>
 void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
     constexpr int kBlockM = Traits::kBlockM;
-    constexpr int smem_size = Traits::kSmemSize;
+    // kSmemSize is evaluated at host compile time (no __CUDA_ARCH__), so it
+    // always resolves to kSmemSizeNoPipeline — wrong for SM80+ which uses the
+    // double-buffered pipeline path and needs kSmemSizePipeline.
+    // Query the actual SM at runtime and pick the right size.
+    const int smem_size = (current_sm_version() >= 80)
+                              ? Traits::kSmemSizePipeline
+                              : Traits::kSmemSizeNoPipeline;
 
     const int num_m_blocks = (params.seqlen_q + kBlockM - 1) / kBlockM;
     dim3 grid(num_m_blocks, params.batch_size * params.num_heads);
@@ -45,15 +60,6 @@ void run_flash_fwd(Flash_fwd_params &params, cudaStream_t stream) {
 //   SM80  (A100):    original full-size blocks (164 KB smem)
 //   SM86+ (Ampere/Ada): same block sizes as SM80 for hdim64; narrower for hdim128
 // ---------------------------------------------------------------------------
-
-inline int current_sm_version() {
-    int device;
-    cudaGetDevice(&device);
-    int major, minor;
-    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, device);
-    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, device);
-    return major * 10 + minor;
-}
 
 inline void run_mha_fwd_hdim64(Flash_fwd_params &params, cudaStream_t stream) {
     const int sm = current_sm_version();

@@ -6,9 +6,9 @@ setup-cuda:
 	@echo "Done. Make sure CUDA_HOME is set:"
 	@echo "  export CUDA_HOME=$$CONDA_PREFIX"
 
-# Build CUDA extension (multi-arch: SM75/80/86/89)
+# Build CUDA extension (arch auto-detected from installed GPU via arch_utils.py)
 build-cuda:
-	cd cuda && TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9" python setup.py build_ext --inplace
+	cd cuda && python setup.py build_ext --inplace
 	cp cuda/cuda_kernels*.so . 2>/dev/null || cp cuda/build/lib*/cuda_kernels*.so . 2>/dev/null
 	@echo "Built cuda_kernels extension"
 
@@ -36,9 +36,9 @@ bench-cuda-softmax:
 clean-cuda:
 	rm -rf cuda/build cuda/dist cuda/*.egg-info cuda/*.so cuda_kernels*.so
 
-# Build the WMMA FlashAttention CUDA extension (multi-arch: SM75/80/86/89)
+# Build the WMMA FlashAttention CUDA extension (arch auto-detected)
 build-fac:
-	cd cuda/flash_attn && TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9" python setup.py build_ext --inplace
+	cd cuda/flash_attn && python setup.py build_ext --inplace
 	@echo "Built flash_attn_cuda extension"
 
 # Run FlashAttention CUDA correctness tests
@@ -113,7 +113,7 @@ fetch-cutlass:
 	fi
 
 build-fac-cutlass:
-	cd cuda/flash_attn_cutlass && CUTLASS_DIR=$(abspath $(CUTLASS_DIR)) TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9" python setup.py build_ext --inplace
+	cd cuda/flash_attn_cutlass && CUTLASS_DIR=$(abspath $(CUTLASS_DIR)) python setup.py build_ext --inplace
 	@echo "Built flash_attn_cutlass extension"
 
 test-fac-cutlass:

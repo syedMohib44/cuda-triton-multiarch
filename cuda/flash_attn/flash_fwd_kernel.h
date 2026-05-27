@@ -130,7 +130,13 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
 
   half *smem_q = reinterpret_cast<half *>(smem_raw);
   half *smem_kv = smem_q + BLOCK_M * Q_STRIDE;
+  // On SM80+ we double-buffer KV (2 slots); on SM75 only 1 slot.
+  // scores/O/P must come AFTER both KV slots to avoid aliasing smem_kv1.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  float *smem_scores = reinterpret_cast<float *>(smem_kv + 2 * BLOCK_N * KV_STRIDE);
+#else
   float *smem_scores = reinterpret_cast<float *>(smem_kv + BLOCK_N * KV_STRIDE);
+#endif
   float *smem_o = smem_scores;
   half *smem_p = reinterpret_cast<half *>(smem_scores + SCORES_O_FLOATS);
   //
@@ -249,16 +255,12 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
     int cur_buf  = (kv_start / BLOCK_N) & 1;
     half *cur_kv = cur_buf ? smem_kv1 : smem_kv;
 
-    // Wait for current K to arrive.
+    // Wait for K_n to arrive (committed in prologue or previous iteration).
     asm volatile("cp.async.wait_group 0;");
     __syncthreads();
 
-    // Immediately issue V async copy into the SAME slot (K is now in regs /
-    // being consumed; we only need V after the Q@K matmul).
-    load_tile_async<BLOCK_N, HEAD_DIM, KV_STRIDE, NTHREADS>(
-        cur_kv, v_ptr + kv_start * params.v_row_stride, params.v_row_stride,
-        kv_rows_valid, tid);
-    asm volatile("cp.async.commit_group;");
+    // NOTE: Q@K WMMA happens below (reads cur_kv for K data).
+    // We must NOT issue V into cur_kv until after Q@K is complete.
 
 #else
   // ------------------------------------------------------------------
@@ -292,10 +294,32 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
                               SCORE_STRIDE, wmma::mem_row_major);
     }
 
+    // Q@K complete; all warps wrote scores to smem. K is no longer needed.
     __syncthreads();
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    // K_n is consumed — safe to overwrite cur_kv with V_n.
+    load_tile_async<BLOCK_N, HEAD_DIM, KV_STRIDE, NTHREADS>(
+        cur_kv, v_ptr + kv_start * params.v_row_stride, params.v_row_stride,
+        kv_rows_valid, tid);
+    asm volatile("cp.async.commit_group;");
+    // Outstanding: 1 group (V_n). V loads while we do softmax below.
+#endif
 
     int score_base = tid * SCORE_STRIDE;
     int p_base = tid * P_STRIDE;
+
+    // Apply causal mask: set scores for key positions > query position to -inf.
+    // Each thread owns exactly one Q row (tid), so no extra sync needed here.
+    if (Is_causal) {
+      const int q_row = m_block * BLOCK_M + tid;
+      for (int j = 0; j < BLOCK_N; j++) {
+        if (kv_start + j > q_row) {
+          smem_scores[score_base + j] = -INFINITY;
+        }
+      }
+    }
+
     // compute max
     float max_old = m_state[0];
     float max_new = max_old;
@@ -315,11 +339,7 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
     l_state[0] = l_state[0] * correction + l_sum;
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-    // Wait for V async copy (issued above, right after K was waited on).
-    asm volatile("cp.async.wait_group 0;");
-    __syncthreads();
-
-    // Prefetch K_{n+1} into the alternate buffer while we compute P@V.
+    // Prefetch K_{n+1} into the alternate buffer (hides K latency behind P@V).
     int next_kv_start = kv_start + BLOCK_N;
     if (next_kv_start < kv_end) {
       int next_buf  = 1 - cur_buf;
@@ -329,7 +349,13 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
           next_kv, k_ptr + next_kv_start * params.k_row_stride,
           params.k_row_stride, next_rows_valid, tid);
       asm volatile("cp.async.commit_group;");
+      // Outstanding: 2 groups (V_n, K_{n+1}). Wait for V_n only.
+      asm volatile("cp.async.wait_group 1;");
+    } else {
+      // Last tile: wait for V_n (no K_{n+1}).
+      asm volatile("cp.async.wait_group 0;");
     }
+    __syncthreads();
 #else
     // SM75 fallback: synchronous V load.
     __syncthreads();

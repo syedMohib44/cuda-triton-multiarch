@@ -1,3 +1,11 @@
+# Check before running
+uname -a
+which nvcc && nvcc --version
+echo "CUDA_HOME=$CUDA_HOME"
+python --version
+which python
+
+
 # Triton + CUDA GPU Kernels
 
 Triton and CUDA kernels for transformer operations — RMSNorm, SwiGLU, softmax, FlashAttention-2, fp16 / int8 / int4 matmul — with PyTorch reference implementations, parametrized correctness tests, and multi-GPU benchmarks.
