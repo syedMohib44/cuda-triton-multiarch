@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cuda-triton-kernels"
+version = "0.1.0"
+description = "Triton GPU kernels for transformer operations — softmax, FlashAttention-2, RMSNorm, SwiGLU, quantized matmul"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "torch>=2.0.0",
+    "triton>=2.1.0; sys_platform != 'win32'",
+    "triton-windows>=3.1.0; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "numpy>=1.20",
+    "ninja>=1.10",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["kernels*"]
+
+[project.urls]
+Homepage = "https://github.com/syedMohib44/cuda-triton-multiarch"

@@ -201,6 +201,8 @@ tests/test_kernels.py         Parametrized correctness tests
 
 ## Setup
 
+### Linux / WSL2 (recommended)
+
 ```bash
 # CUDA 13.0 path (current setup)
 conda create -n torch_cuda13 python=3.12 -y
@@ -212,58 +214,132 @@ pip install -r requirements.txt   # triton, ninja, pytest, numpy
 # CUDA 12.x: drop the --index-url and use the default PyTorch wheels.
 ```
 
+### Windows (Native)
+
+Triton kernels (`kernels/`) work on Windows via the [`triton-windows`](https://pypi.org/project/triton-windows/) community package.
+CUDA C++ extensions (`cuda/`) require Visual Studio Build Tools 2019+ for MSVC compilation.
+
+```powershell
+# 1. Install PyTorch with CUDA (adjust cu128 to match your CUDA version)
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+
+# 2. Install triton-windows (drop-in replacement for triton on Windows)
+pip install triton-windows ninja pytest numpy
+
+# 3. Triton kernels work immediately — no build step needed
+python -m pytest tests/test_kernels.py -v -k "not CUDA"
+
+# 4. CUDA C++ extensions (optional) — requires Visual Studio Build Tools
+powershell -ExecutionPolicy Bypass -File Makefile.windows.ps1 build-cuda
+powershell -ExecutionPolicy Bypass -File Makefile.windows.ps1 test-cuda
+```
+
+> **Performance:** GPU kernels compile to identical PTX/CUBIN on both platforms.
+> There is zero runtime performance difference between Linux and Windows for GPU-bound workloads.
+
+### WSL2 note
+
+WSL2 with CUDA (supported since Windows 10 21H1) gives a full Linux environment on Windows hardware.
+Use the Linux setup above inside WSL2. GPU performance is identical to native Linux.
+
 ## GPU auto-detection
 
 The build system detects your GPU automatically — no manual architecture flags needed.
 
+#### Linux / WSL2
 ```bash
-# See what GPU was detected and which block sizes will be used
 python gpu_utils.py
 ```
 
-Example output on an RTX 3070:
-```
-[0] NVIDIA GeForce RTX 3070
-     SM86  |  max_smem=100 KB  |  cp.async=yes  |  fp16 peak=142 TFLOPS  |  supported=yes
-     Optimal blocks: hdim64→(128,64)  hdim128→(128,32)
+#### Windows (Native)
+```powershell
+python gpu_utils.py
 ```
 
-`setup.py` reads this at build time and compiles only for the detected SM, making builds faster. To override (e.g. for CI or cross-compilation):
+Example output on an RTX 5070:
+```
+[0] NVIDIA GeForce RTX 5070
+     SM120  |  max_smem=228 KB  |  cp.async=yes  |  fp16 peak=145 TFLOPS  |  supported=yes
+     Optimal blocks: hdim64→(128,64)  hdim128→(128,64)
+```
 
+`setup.py` reads this at build time and compiles only for the detected SM. To override (e.g. for CI or cross-compilation):
+
+#### Linux / WSL2
 ```bash
 TORCH_CUDA_ARCH_LIST="8.0 8.6" make build-fac
+```
+
+#### Windows (Native)
+```powershell
+$env:TORCH_CUDA_ARCH_LIST="8.0 8.6"
+powershell -ExecutionPolicy Bypass -File Makefile.windows.ps1 build-fac
 ```
 
 ## Testing
 
 ### Step 1 — Triton kernels (no build required)
 
-Triton compiles JIT on first run. No setup needed beyond `pip install -r requirements.txt`.
+Triton compiles JIT on first run. No setup needed beyond installing the package.
 
+#### Linux / WSL2
 ```bash
 # All Triton kernel correctness tests
 make test-triton
 
-# Or run individual kernel tests by name
+# Individual kernels
 python -m pytest tests/test_kernels.py -v -k "RMSNorm"
 python -m pytest tests/test_kernels.py -v -k "SwiGLU"
 python -m pytest tests/test_kernels.py -v -k "Softmax"
-python -m pytest tests/test_kernels.py -v -k "FlashAttention"   # Triton FA2 (causal + non-causal)
+python -m pytest tests/test_kernels.py -v -k "FlashAttention"
 python -m pytest tests/test_kernels.py -v -k "Quantization"
 ```
 
+#### Windows (Native)
+```powershell
+# All Triton kernel correctness tests
+powershell -ExecutionPolicy Bypass -File Makefile.windows.ps1 test-triton
+
+# Individual kernels (same pytest commands work on both platforms)
+python -m pytest tests/test_kernels.py -v -k "RMSNorm"
+python -m pytest tests/test_kernels.py -v -k "SwiGLU"
+python -m pytest tests/test_kernels.py -v -k "Softmax"
+python -m pytest tests/test_kernels.py -v -k "FlashAttention"
+python -m pytest tests/test_kernels.py -v -k "Quantization"
+```
+
+---
+
 ### Step 2 — CUDA softmax extension
 
+Requires Visual Studio Build Tools 2019+ on Windows.
+
+#### Linux / WSL2
 ```bash
 make build-cuda        # auto-detects GPU, compiles for your SM
 make test-cuda         # runs CUDA softmax correctness tests
 ```
 
+#### Windows (Native)
+```powershell
+powershell -ExecutionPolicy Bypass -File Makefile.windows.ps1 build-cuda
+powershell -ExecutionPolicy Bypass -File Makefile.windows.ps1 test-cuda
+```
+
+---
+
 ### Step 3 — WMMA FlashAttention
 
+#### Linux / WSL2
 ```bash
 make build-fac         # auto-detects GPU
 make test-fac          # non-causal + causal correctness vs PyTorch SDPA
+```
+
+#### Windows (Native)
+```powershell
+powershell -ExecutionPolicy Bypass -File Makefile.windows.ps1 build-fac
+powershell -ExecutionPolicy Bypass -File Makefile.windows.ps1 test-fac
 ```
 
 Tests cover:
@@ -271,12 +347,21 @@ Tests cover:
 - **Causal masking** — output compared against `scaled_dot_product_attention(is_causal=True)`
 - Output shape and LSE shape
 
+---
+
 ### Step 4 — CuTe/CUTLASS FlashAttention
 
+#### Linux / WSL2
 ```bash
 make fetch-cutlass          # clone CUTLASS v3.6.0 once into third_party/
 make build-fac-cutlass      # auto-detects GPU
 make test-fac-cutlass       # non-causal + causal + hdim=32
+```
+
+#### Windows (Native)
+```powershell
+powershell -ExecutionPolicy Bypass -File Makefile.windows.ps1 build-fac-cutlass
+powershell -ExecutionPolicy Bypass -File Makefile.windows.ps1 test-fac-cutlass
 ```
 
 Tests cover:
@@ -284,10 +369,22 @@ Tests cover:
 - **Causal masking** — including long sequences (512) that stress the diagonal-tile masking logic
 - Output shape
 
+---
+
 ### Run everything
 
+#### Linux / WSL2
 ```bash
 make test              # all tests: Triton + CUDA softmax + WMMA FA2 + CuTe FA2
+```
+
+#### Windows (Native)
+```powershell
+# Triton tests (no build needed)
+powershell -ExecutionPolicy Bypass -File Makefile.windows.ps1 test-triton
+
+# Full suite (requires build-cuda + build-fac + build-fac-cutlass first)
+powershell -ExecutionPolicy Bypass -File Makefile.windows.ps1 test
 ```
 
 Expected output: all tests pass with `atol=1e-2` tolerance against PyTorch SDPA.
