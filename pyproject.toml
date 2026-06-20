@@ -24,7 +24,7 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["kernels*"]
+include = ["kernels*", "cuda*"]
 
 [project.urls]
 Homepage = "https://github.com/syedMohib44/cuda-triton-multiarch"

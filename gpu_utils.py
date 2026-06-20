@@ -84,47 +84,53 @@ _BLOCK_SIZES: dict[int, dict[int, tuple[int, int]]] = {
 # Public API
 # ---------------------------------------------------------------------------
 
-def get_gpu_info(device: int | str | torch.device | None = None) -> dict:
-    """Return GPU properties for the given device (default: current CUDA device).
+# ---------------------------------------------------------------------------
+# Public API (Dynamically Updated)
+# ---------------------------------------------------------------------------
 
-    Returns a dict with keys:
-        name         (str)  — e.g. "NVIDIA A100-SXM4-80GB"
-        sm_version   (int)  — e.g. 80 for SM8.0
-        max_smem     (int)  — max shared memory per CTA in bytes
-        has_cp_async (bool) — whether cp.async is available
-        fp16_tflops  (float)— fp16 tensor-core peak TFLOPs (0.0 if unknown)
-        supported    (bool) — whether this project has a kernel for this GPU
-    """
+def get_gpu_info(device: int | str | torch.device | None = None) -> dict:
+    """Return GPU properties for the given device (default: current CUDA device)."""
     if not torch.cuda.is_available():
         raise RuntimeError("No CUDA device available.")
 
     if device is None:
         device = torch.cuda.current_device()
-
+        
     props = torch.cuda.get_device_properties(device)
     sm = props.major * 10 + props.minor
+
+    # OS-AGNOSTIC SMEM: 
+    # Try the newer 'optin' property first, fallback to the standard property, 
+    # and if Windows PyTorch is missing both, fallback to the 64KB CUDA minimum.
+    dynamic_smem = getattr(props, 'max_shared_memory_per_block_optin', 
+                   getattr(props, 'max_shared_memory_per_block', 65536))
 
     return {
         "name": props.name,
         "sm_version": sm,
-        "max_smem": _MAX_SMEM.get(sm, props.max_shared_memory_per_block),
-        "has_cp_async": _HAS_CP_ASYNC.get(sm, sm >= 80),
-        "fp16_tflops": _FP16_PEAK_TFLOPS.get(sm, 0.0),
-        "supported": sm in _MAX_SMEM,
+        "max_smem": _MAX_SMEM.get(sm, dynamic_smem),
+        "has_cp_async": sm >= 80,  # DYNAMIC: All SM80 and newer GPUs have cp.async
+        "fp16_tflops": _FP16_PEAK_TFLOPS.get(sm, 0.0), # 0.0 is fine for unknown GPUs
+        "supported": sm >= 75,     # DYNAMIC: Assume any Turing (SM75) or newer is supported
     }
 
 
 def get_optimal_block_sizes(sm: int, head_dim: int) -> tuple[int, int]:
-    """Return (BLOCK_Q, BLOCK_KV) tuned for the given SM and head_dim.
-
-    Falls back to the most conservative config if SM is unknown.
-    """
+    """Return (BLOCK_Q, BLOCK_KV) tuned for the given SM and head_dim."""
+    
+    # DYNAMIC FALLBACK:
+    # If the exact SM isn't in our dictionary, gracefully downgrade to the 
+    # closest known architecture instead of crashing or defaulting to the slowest.
     if sm not in _BLOCK_SIZES:
-        # Unknown GPU — use smallest safe config
-        return (64, 32)
+        if sm >= 120:   closest_sm = 120  # Future Blackwell+
+        elif sm >= 90:  closest_sm = 90   # Hopper+
+        elif sm >= 80:  closest_sm = 80   # Ampere/Ada+
+        else:           closest_sm = 75   # Turing
+        sizes = _BLOCK_SIZES[closest_sm]
+    else:
+        sizes = _BLOCK_SIZES[sm]
 
     # Find the closest supported head_dim key (32, 64, 128)
-    sizes = _BLOCK_SIZES[sm]
     if head_dim in sizes:
         return sizes[head_dim]
     # Round up to next supported head_dim
@@ -134,17 +140,14 @@ def get_optimal_block_sizes(sm: int, head_dim: int) -> tuple[int, int]:
     return sizes[max(sizes)]
 
 
-def check_gpu_support(raise_on_unsupported: bool = True) -> dict:
-    """Check the current GPU and warn/raise if not supported.
 
-    Returns gpu_info dict (same as get_gpu_info).
-    """
+def check_gpu_support(raise_on_unsupported: bool = True) -> dict:
+    """Check the current GPU and warn/raise if not supported."""
     info = get_gpu_info()
     if not info["supported"]:
         msg = (
-            f"GPU '{info['name']}' (SM{info['sm_version']}) is not supported.\n"
-            f"Supported: SM75 (Turing), SM80 (A100), SM86/89 (Ampere/Ada), "
-            f"SM90 (Hopper), SM120 (Blackwell)."
+            f"GPU '{info['name']}' (SM{info['sm_version']}) is too old.\n"
+            f"This project requires an NVIDIA GPU with SM75 (Turing) or higher."
         )
         if raise_on_unsupported:
             raise RuntimeError(msg)
