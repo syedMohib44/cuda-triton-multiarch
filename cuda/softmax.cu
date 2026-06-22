@@ -18,6 +18,11 @@
 #include <math.h>
 #include <torch/extension.h>
 
+
+// `half` uses 16-bit floats (FP16) to halve memory bandwidth and accelerate GPU compute.
+// `__restrict__` guarantees the compiler that the input and output pointers do not overlap.
+// Together, they allow aggressive compiler optimizations like vectorization and loop unrolling.
+
 // Each block handles one row. Threads within the block collaborate on the
 // reduction. This is equivalent to your Triton softmax where each program
 // handles one row.
