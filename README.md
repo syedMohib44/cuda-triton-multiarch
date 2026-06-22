@@ -10,7 +10,7 @@ which python
 
 Triton and CUDA kernels for transformer operations — RMSNorm, SwiGLU, softmax, FlashAttention-2, fp16 / int8 / int4 matmul — with PyTorch reference implementations, parametrized correctness tests, and multi-GPU benchmarks.
 
-Supports **SM75 (Turing / T4, RTX 20xx)**, **SM80 (A100)**, **SM86 (RTX 30xx / A10)**, **SM89 (RTX 40xx / L40S)**. GPU is auto-detected at build and runtime — no manual configuration needed.
+Supports **SM75 (Turing / T4, RTX 20xx)**, **SM80 (A100)**, **SM86 (RTX 30xx / A10)**, **SM89 (RTX 40xx / L40S)**, **SM120 (Blackwell / RTX 50xx)**. GPU is auto-detected at build and runtime — no manual configuration needed.
 
 > **Blog post:** [**FlashAttention, but the Actual Details**](https://blog.echen.io/p/flashattention-2-in-cute-from-scratch/) — line-by-line walkthrough of the CuTe FA2 implementation in [`cuda/flash_attn_cutlass/`](cuda/flash_attn_cutlass/), covering swizzling, tiled MMAs, online softmax, the V-copy + transpose, and at least one finding about an unused line in Tri Dao's source. The companion `scratch/` directory has standalone runnable demos for each concept ([scratch README](scratch/README.md)).
 
@@ -182,6 +182,73 @@ Weight Memory Savings:  int8 = 2.0x less,  int4 = 3.8x less
 The quantized kernels are slower than cuBLAS fp16 for two reasons. First, the Triton fp16 baseline is already 0.74-1.03× of cuBLAS, which has software pipelining, L2 swizzling, and warp specialization that this kernel doesn't. Second, dequantization adds per-tile overhead inside the K-loop. Comparing int8/int4 to the Triton fp16 baseline isolates the dequant cost at ~0.71-0.84× / ~0.48-0.79×.
 
 The bandwidth savings from loading less data (int8 = half, int4 = quarter) don't compensate for the dequant compute at these sizes — the kernels aren't purely memory-bandwidth bound. Production avoids the tradeoff entirely with integer tensor core instructions (int8×int8→int32) or FP8 tensor cores (H100+), which compute on quantized data without dequantizing. The value of dequantize-on-the-fly is memory savings (fitting larger models on fewer GPUs), not latency.
+
+## Multi-head attention API (`flash_attention_bhsd`)
+
+`kernels/attention_api.py` exposes a single high-level entry point for multi-head attention on `(B, H, T, d)` tensors — the layout used by KVQuant and most transformer inference code:
+
+```python
+from kernels import flash_attention_bhsd, flash_attention_backend
+
+# q, k, v: (batch, heads, seqlen, head_dim) — fp16 / bf16 / fp32, GPU or CPU
+out = flash_attention_bhsd(q, k, v, is_causal=False)
+
+print(flash_attention_backend())
+# → "flash_attn_cuda (WMMA)"        if WMMA extension is built
+# → "flash_attn_cutlass (CuTe)"     if CUTLASS extension is built
+# → "flash_attention_triton (Triton)" if only Triton is available
+# → "scaled_dot_product_attention (PyTorch)" on CPU / fallback
+```
+
+Backend cascade (fastest to slowest):
+
+| Priority | Backend | Requires |
+|---|---|---|
+| 1 | `flash_attn_cuda` (WMMA) | `make build-fac` / `Makefile.windows.ps1 build-fac` |
+| 2 | `flash_attn_cutlass` (CuTe) | `make build-fac-cutlass` / `Makefile.windows.ps1 build-fac-cutlass` |
+| 3 | `flash_attention_triton` (Triton) | `pip install triton` / `triton-windows` — JIT, no build |
+| 4 | `F.scaled_dot_product_attention` | Always available — CPU / bf16 / fp32 fallback |
+
+CUDA kernels expect `(B, T, H, d)` internally; the adapter transposes automatically so callers always use `(B, H, T, d)`.
+
+---
+
+## KVQuant integration
+
+This package is the GPU backend for [kvquant-plus-plus](https://github.com/syedMohib44/kvquant). Install both with:
+
+```bash
+pip install "kvquant-plus-plus[cuda]"
+# cuda-triton-kernels is pulled from this GitHub repo automatically
+```
+
+Or install cuda-triton standalone for use in any project:
+
+```bash
+pip install "git+https://github.com/syedMohib44/cuda-triton-multiarch.git"
+```
+
+Once installed, the `kernels` package is importable directly:
+
+```python
+from kernels import softmax_triton, flash_attention_bhsd, flash_attention_backend
+```
+
+To also use the CUDA extensions (WMMA / CUTLASS flash attention), build them separately after install — they require `nvcc` and, on Windows, Visual Studio Build Tools:
+
+```bash
+# Linux / WSL2
+make build-fac           # WMMA FlashAttention
+make build-fac-cutlass   # CuTe/CUTLASS FlashAttention
+
+# Windows (Native)
+powershell -ExecutionPolicy Bypass -File Makefile.windows.ps1 build-fac
+powershell -ExecutionPolicy Bypass -File Makefile.windows.ps1 build-fac-cutlass
+```
+
+`flash_attention_bhsd` picks up the compiled extensions automatically on the next import — no code changes needed.
+
+---
 
 ## Project structure
 
@@ -461,3 +528,4 @@ pytest tests/test_kernels.py -k "Quantization" -v
   | SM80 | A100, A30 | Full config; benchmarks in this README |
   | SM86 | RTX 3090, RTX 3070, A10 | 100 KB smem; hdim128 uses narrower BLOCK_N |
   | SM89 | RTX 4090, L40S | Same as SM86 |
+  | SM120 | RTX 5070, RTX 5090 (Blackwell) | Dispatches SM86 kernel path at runtime (100 KB smem limit) |

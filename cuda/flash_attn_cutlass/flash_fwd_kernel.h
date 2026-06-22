@@ -161,8 +161,13 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
       // kv col indices for this tile: [nblock*kBlockN, (nblock+1)*kBlockN)
       // Mask if q_row < kv_col, i.e. j > i.
       // Only needed for the tile straddling the diagonal.
-      const bool is_diagonal_tile = (nblock == nBlocksN - 1) &&
-                                    ((m_block + 1) * kBlockM > nblock * kBlockN);
+      // A tile needs masking if it's not fully below the diagonal.
+      // "Fully below" means max kv_col in tile < min q_row:
+      //   (nblock+1)*kBlockN <= m_block*kBlockM
+      // So mask is needed when (nblock+1)*kBlockN > m_block*kBlockM.
+      // NOTE: the last-tile-only optimization is only safe when kBlockN >= kBlockM.
+      // For kBlockM > kBlockN (e.g. 128 vs 64), m_block=0 has multiple diagonal tiles.
+      const bool is_diagonal_tile = ((nblock + 1) * kBlockN > m_block * kBlockM);
       if (is_diagonal_tile) {
         // acc_s layout: (MMA, MMA_M, MMA_N) — apply mask element-wise.
         // Each thread owns a subset of (kBlockM × kBlockN) scores.

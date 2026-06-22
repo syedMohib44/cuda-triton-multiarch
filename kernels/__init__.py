@@ -5,7 +5,9 @@ Public API:
     softmax_triton(x)                         row-wise numerically-stable softmax
     rmsnorm_triton(x, weight, eps)            RMSNorm
     swiglu_triton(x, gate)                    SwiGLU activation
-    flash_attention_triton(Q, K, V, causal)   FlashAttention-2 forward
+    flash_attention_triton(Q, K, V)           FlashAttention-2 forward — (T, d) single-head
+    flash_attention_bhsd(q, k, v, is_causal)  FlashAttention-2 forward — (B, H, T, d) multi-head
+    flash_attention_backend()                 returns active backend name
     matmul_fp16_triton(x, W)                  tiled fp16 matmul
     matmul_int8_triton(x, W, scale, zp)       int8 dequant matmul
     matmul_int4_triton(x, W, scales, zeros)   int4 dequant matmul
@@ -18,6 +20,7 @@ from .softmax import softmax_triton, softmax_pytorch
 from .rmsnorm import rmsnorm_triton, rmsnorm_pytorch
 from .swiglu import swiglu_triton
 from .flash_attention import flash_attention_triton
+from .attention_api import flash_attention_bhsd, flash_attention_backend
 from .quantized_matmul import (
     matmul_fp16_triton,
     matmul_int8_triton,
@@ -39,6 +42,8 @@ __all__ = [
     "swiglu_triton",
     # flash attention
     "flash_attention_triton",
+    "flash_attention_bhsd",
+    "flash_attention_backend",
     # matmul
     "matmul_fp16_triton",
     "matmul_int8_triton",
