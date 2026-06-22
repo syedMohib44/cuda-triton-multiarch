@@ -1,0 +1,15 @@
+torch>=2.0
+
+# Linux:
+# triton>=2.0
+
+# Windows:
+triton-windows
+
+ninja>=1.10
+pytest>=7.0
+numpy>=1.20
+
+# Remove these unless using CUDA 13
+# nvidia-cutlass-dsl[cu13]
+# quack-kernels[cu13]
