@@ -91,7 +91,7 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   constexpr int KV_STRIDE = HEAD_DIM + 8;   // halves
   constexpr int SCORE_STRIDE = BLOCK_N + 4; // FLOATS, +4 (16 bytes)
   constexpr int P_STRIDE = BLOCK_N + 8;     // halves
-  constexpr int O_STRIDE = HEAD_DIM + 4;
+  // O_STRIDE eliminated: O accumulator lives in WMMA registers, not smem
 
   // WMMA matmul constants
   constexpr int NWARPS = NTHREADS / 32;
