@@ -52,7 +52,12 @@ jobs:
         with:
           cuda: ${{ matrix.cuda }}
           method: network
-          sub-packages: '["nvcc", "cudart-dev", "libcusparse-dev", "libcublas-dev"]'
+          sub-packages: '["nvcc", "cudart-dev"]'
+
+      - name: Install CUDA dev headers (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y libcusparse-dev-12-4 libcublas-dev-12-4
 
       - name: Install CUDA Toolkit (Windows)
         if: runner.os == 'Windows'
