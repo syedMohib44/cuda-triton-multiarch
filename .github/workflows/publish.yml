@@ -52,7 +52,7 @@ jobs:
         with:
           cuda: ${{ matrix.cuda }}
           method: network
-          sub-packages: '["nvcc", "cudart-dev"]'
+          sub-packages: '["nvcc", "cudart-dev", "libcusparse-dev", "libcublas-dev"]'
 
       - name: Install CUDA Toolkit (Windows)
         if: runner.os == 'Windows'
