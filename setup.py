@@ -119,16 +119,16 @@ if COMPILE_CUDA:
         cpp_std = ["-std=c++20"] if sys.platform == "win32" else ["-std=c++17"]
 
         # ---- WMMA extension ------------------------------------------------
-        wmma_dir = os.path.join(HERE, "cuda", "flash_attn")
+        # setuptools requires paths relative to the setup.py (repo root), never absolute
         ext_modules.append(
             CUDAExtension(
                 "kernels.flash_attn_cuda",   # installs as kernels/flash_attn_cuda*.so
                 sources=[
-                    os.path.join(wmma_dir, "flash_api.cu"),
-                    os.path.join(wmma_dir, "flash_fwd_hdim64_fp16_sm80.cu"),
-                    os.path.join(wmma_dir, "flash_fwd_hdim64_fp16_causal_sm80.cu"),
-                    os.path.join(wmma_dir, "flash_fwd_hdim128_fp16_sm80.cu"),
-                    os.path.join(wmma_dir, "flash_fwd_hdim128_fp16_causal_sm80.cu"),
+                    "cuda/flash_attn/flash_api.cu",
+                    "cuda/flash_attn/flash_fwd_hdim64_fp16_sm80.cu",
+                    "cuda/flash_attn/flash_fwd_hdim64_fp16_causal_sm80.cu",
+                    "cuda/flash_attn/flash_fwd_hdim128_fp16_sm80.cu",
+                    "cuda/flash_attn/flash_fwd_hdim128_fp16_causal_sm80.cu",
                 ],
                 extra_compile_args={
                     "nvcc": ["-O3", "--use_fast_math", *cpp_std,
@@ -141,21 +141,23 @@ if COMPILE_CUDA:
 
         # ---- CUTLASS extension ---------------------------------------------
         if _ensure_cutlass():
-            cutlass_dir = os.path.join(HERE, "cuda", "flash_attn_cutlass")
+            cutlass_rel   = os.path.relpath(CUTLASS_DIR, HERE)
             ext_modules.append(
                 CUDAExtension(
                     "kernels.flash_attn_cutlass",
                     sources=[
-                        os.path.join(cutlass_dir, "flash_api.cu"),
-                        os.path.join(cutlass_dir, "flash_fwd_hdim32_fp16_sm80.cu"),
-                        os.path.join(cutlass_dir, "flash_fwd_hdim32_fp16_causal_sm80.cu"),
-                        os.path.join(cutlass_dir, "flash_fwd_hdim64_fp16_sm80.cu"),
-                        os.path.join(cutlass_dir, "flash_fwd_hdim64_fp16_causal_sm80.cu"),
-                        os.path.join(cutlass_dir, "flash_fwd_hdim128_fp16_sm80.cu"),
-                        os.path.join(cutlass_dir, "flash_fwd_hdim128_fp16_causal_sm80.cu"),
+                        "cuda/flash_attn_cutlass/flash_api.cu",
+                        "cuda/flash_attn_cutlass/flash_fwd_hdim32_fp16_sm80.cu",
+                        "cuda/flash_attn_cutlass/flash_fwd_hdim32_fp16_causal_sm80.cu",
+                        "cuda/flash_attn_cutlass/flash_fwd_hdim64_fp16_sm80.cu",
+                        "cuda/flash_attn_cutlass/flash_fwd_hdim64_fp16_causal_sm80.cu",
+                        "cuda/flash_attn_cutlass/flash_fwd_hdim128_fp16_sm80.cu",
+                        "cuda/flash_attn_cutlass/flash_fwd_hdim128_fp16_causal_sm80.cu",
                     ],
-                    include_dirs=[CUTLASS_INCLUDE,
-                                  os.path.join(CUTLASS_DIR, "tools", "util", "include")],
+                    include_dirs=[
+                        os.path.join(cutlass_rel, "include"),
+                        os.path.join(cutlass_rel, "tools", "util", "include"),
+                    ],
                     extra_compile_args={
                         "nvcc": ["-O3", "--use_fast_math", *cpp_std,
                                  *get_gencode_flags("flash_attn_cutlass"),
