@@ -65,7 +65,7 @@ jobs:
         with:
           cuda: ${{ matrix.cuda }}
           method: network
-          sub-packages: '["nvcc", "cudart"]'
+          sub-packages: '["nvcc", "cudart", "cublas_dev", "cusparse_dev"]'
 
       # -----------------------------------------------------------------------
       # 4. Install build dependencies
