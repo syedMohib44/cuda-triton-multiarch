@@ -105,12 +105,8 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   // violated.
   static_assert(BLOCK_M == NTHREADS, "v1: 1 thread per row");
 
-  // scores and O alias the same smem region; reserve the larger of the two
-  // (using the padded strides).
+  // O is kept in WMMA fragment registers (not smem). Only scores need this buffer.
   constexpr int SCORES_FLOATS = BLOCK_M * SCORE_STRIDE;
-  constexpr int O_FLOATS = BLOCK_M * O_STRIDE;
-  constexpr int SCORES_O_FLOATS =
-      SCORES_FLOATS > O_FLOATS ? SCORES_FLOATS : O_FLOATS;
 
   // Thread / block indices
   const int m_block = blockIdx.x; // which chunk of Q rows
@@ -137,8 +133,8 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
 #else
   float *smem_scores = reinterpret_cast<float *>(smem_kv + BLOCK_N * KV_STRIDE);
 #endif
-  float *smem_o = smem_scores;
-  half *smem_p = reinterpret_cast<half *>(smem_scores + SCORES_O_FLOATS);
+  // smem_o is eliminated — O lives in WMMA fragment registers.
+  half *smem_p = reinterpret_cast<half *>(smem_scores + SCORES_FLOATS);
   //
   // Partition shared memory:
   //   half *smem_q      = (half *)smem_raw;                         //
@@ -153,7 +149,10 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   //   HEAD_DIM);
   //   // BLOCK_M × BLOCK_N
 
-  float scale = rsqrtf(HEAD_DIM);
+  // Use log2e-prescaled scale so the hot softmax loop can use exp2f (one PTX
+  // instruction) instead of expf (multi-instruction approximation).
+  // params.scale_softmax_log2 = (1/sqrt(HEAD_DIM)) * log2(e)
+  float scale_log2 = params.scale_softmax_log2;   // for exp2f paths
 
   const half *q_ptr = reinterpret_cast<const half *>(params.q_ptr) +
                       BLOCK_M * m_block * params.q_row_stride +
@@ -187,33 +186,26 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
 #endif
 
   // ========================================================================
-  // Step 4: Initialize O accumulator (fp32, in registers) and softmax state
+  // Step 4: Initialize O accumulator and softmax state
   // ========================================================================
-  // O accumulator: each thread manages a subset of the BLOCK_M × HEAD_DIM
-  // output.
+  // O is kept as persistent WMMA accumulator fragments in registers.
+  // This eliminates the per-tile smem_o round-trip:
+  //   old: store_matrix_sync → smem_o → __syncthreads → read back into o_acc
+  //   new: apply correction directly on o_frags[i].x[e] (warp shuffles for
+  //        per-row correction), then mma_sync accumulates into o_frags.
   //
-  // With 128 threads and BLOCK_M=128, each thread handles 1 full row (HEAD_DIM
-  // floats). Or with WMMA store/load, it's distributed across warp threads.
+  // WMMA m16n16k16 accumulator layout (fp32, 8 elements per thread, lane t):
+  //   element e: row = (t/4) + 8*(e/4),  col = (t%4)*2 + (e%2) + 8*((e/2)%2)
   //
-  // Simplest approach (Phase 1): keep O in shared memory as fp32, accumulate
-  // there. Better approach: keep O as an array of WMMA accumulator fragments.
-  //
-  // For Phase 1, allocate per-thread:
-  const int rows_per_thread = BLOCK_M / NTHREADS;
-  float o_acc[rows_per_thread][HEAD_DIM];
-  float m_state[rows_per_thread];
-  float l_state[rows_per_thread];
+  // softmax state: 1 float per row per thread (BLOCK_M == NTHREADS → 1 row).
+  const int laneId = tid % 32;
 
-  m_state[0] = -INFINITY;
-  l_state[0] = 0.0f;
-  for (int d = 0; d < HEAD_DIM; d++) {
-    o_acc[0][d] = 0.0f;
-  }
+  wmma::fragment<wmma::accumulator, 16, 16, 16, float> o_frags[O_TILES_PER_WARP];
+#pragma unroll
+  for (int i = 0; i < O_TILES_PER_WARP; i++) wmma::fill_fragment(o_frags[i], 0.0f);
 
-  //   const int rows_per_thread = BLOCK_M / NTHREADS;  // e.g., 128/128 = 1
-  //   float o_acc[rows_per_thread][HEAD_DIM];           // zero-initialized
-  //   float m_state[rows_per_thread];                   // = -INFINITY
-  //   float l_state[rows_per_thread];                   // = 0
+  float m_state = -INFINITY;
+  float l_state = 0.0f;
 
   // ========================================================================
   // Step 5: KV tile loop
@@ -256,6 +248,10 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
     half *cur_kv = cur_buf ? smem_kv1 : smem_kv;
 
     // Wait for K_n to arrive (committed in prologue or previous iteration).
+    // The WMMA prologue pre-issues only K[0]; subsequent K tiles are issued at
+    // the end of the previous iteration (before P@V), so by the time we reach
+    // here K[n] has had the entire P@V GEMM to complete — wait_group 0 is
+    // safe and ensures the smem slot is fully written before the next GEMM.
     asm volatile("cp.async.wait_group 0;");
     __syncthreads();
 
@@ -272,6 +268,42 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
     load_tile_sync<BLOCK_N, HEAD_DIM, KV_STRIDE, NTHREADS>(
         cur_kv, k_ptr + kv_start * params.k_row_stride, params.k_row_stride,
         kv_rows_valid, tid);
+#endif
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+    // Issue V_n async load NOW, before the Q@K WMMA loop.
+    // cur_kv holds K_n which WMMA is about to READ (not write), so issuing
+    // an async store into cur_kv (which cp.async writes from the L2 side)
+    // is safe only AFTER the WMMA reads finish.  We therefore use a
+    // *separate* staging approach: commit V into cur_kv after the sync that
+    // follows the WMMA loop — but we can at least overlap the DMA latency
+    // with the WMMA compute by issuing the prefetch of K_{n+1} here instead
+    // (moved up from after softmax), freeing the post-softmax window for V wait.
+    //
+    // Revised pipeline per tile n (SM80+):
+    //   [top of loop]  wait K_n  (issued end-of-prev or prologue)
+    //   ** issue K_{n+1} prefetch NOW (into alt slot) **
+    //   Q @ K_n WMMA
+    //   __syncthreads()
+    //   issue V_n async (into cur_kv slot, K_n no longer needed)
+    //   commit V_n group
+    //   softmax (hides V_n latency)
+    //   wait V_n (≤1 group left: V_n; K_{n+1} may still be in flight → wait_group 1)
+    //   P @ V_n WMMA
+    //
+    // This way K_{n+1} overlaps with both Q@K WMMA *and* softmax.
+    int next_kv_start_early = kv_start + BLOCK_N;
+    if (next_kv_start_early < kv_end) {
+      int next_buf_early  = 1 - cur_buf;
+      half *next_kv_early = next_buf_early ? smem_kv1 : smem_kv;
+      int next_rows_early = min(BLOCK_N, params.seqlen_k - next_kv_start_early);
+      load_tile_async<BLOCK_N, HEAD_DIM, KV_STRIDE, NTHREADS>(
+          next_kv_early,
+          k_ptr + next_kv_start_early * params.k_row_stride,
+          params.k_row_stride, next_rows_early, tid);
+      asm volatile("cp.async.commit_group;");
+      // Outstanding: 1 group (K_{n+1}).
+    }
 #endif
 
     // Q @ K^T using WMMA
@@ -294,7 +326,7 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
                               SCORE_STRIDE, wmma::mem_row_major);
     }
 
-    // Q@K complete; all warps wrote scores to smem. K is no longer needed.
+    // Q@K complete; all warps wrote scores to smem. K_n is no longer needed.
     __syncthreads();
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
@@ -303,7 +335,7 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
         cur_kv, v_ptr + kv_start * params.v_row_stride, params.v_row_stride,
         kv_rows_valid, tid);
     asm volatile("cp.async.commit_group;");
-    // Outstanding: 1 group (V_n). V loads while we do softmax below.
+    // Outstanding: K_{n+1} (if not last tile) + V_n = up to 2 groups.
 #endif
 
     int score_base = tid * SCORE_STRIDE;
@@ -320,39 +352,40 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
       }
     }
 
-    // compute max
-    float max_old = m_state[0];
+    // Online softmax with exp2f (single PTX instruction vs multi-step expf).
+    // All exponents are in log2 base: exp2(x * scale_log2 - adj_max).
+    float max_old = m_state;
     float max_new = max_old;
+#pragma unroll
     for (int j = 0; j < BLOCK_N; j++) {
-      smem_scores[score_base + j] *= scale;
-      max_new = fmaxf(max_new, smem_scores[score_base + j]);
+      // Pre-scale once; max reduction in same pass.
+      float s = smem_scores[score_base + j] * scale_log2;
+      smem_scores[score_base + j] = s;
+      max_new = fmaxf(max_new, s);
     }
-    m_state[0] = max_new;
+    m_state = max_new;
 
-    float correction = expf(max_old - max_new);
+    // Rescale O accumulator and running sum by exp2(max_old - max_new).
+    float correction = exp2f(max_old - max_new);
     float l_sum = 0.f;
+#pragma unroll
     for (int j = 0; j < BLOCK_N; j++) {
-      float score = __expf(smem_scores[score_base + j] - max_new);
+      float score = exp2f(smem_scores[score_base + j] - max_new);
       l_sum += score;
       smem_p[p_base + j] = __float2half(score);
     }
-    l_state[0] = l_state[0] * correction + l_sum;
+    l_state = l_state * correction + l_sum;
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
-    // Prefetch K_{n+1} into the alternate buffer (hides K latency behind P@V).
-    int next_kv_start = kv_start + BLOCK_N;
-    if (next_kv_start < kv_end) {
-      int next_buf  = 1 - cur_buf;
-      half *next_kv = next_buf ? smem_kv1 : smem_kv;
-      int next_rows_valid = min(BLOCK_N, params.seqlen_k - next_kv_start);
-      load_tile_async<BLOCK_N, HEAD_DIM, KV_STRIDE, NTHREADS>(
-          next_kv, k_ptr + next_kv_start * params.k_row_stride,
-          params.k_row_stride, next_rows_valid, tid);
-      asm volatile("cp.async.commit_group;");
-      // Outstanding: 2 groups (V_n, K_{n+1}). Wait for V_n only.
+    // At this point outstanding groups are:
+    //   - K_{n+1} (if not last tile, issued before Q@K)
+    //   - V_n     (issued after Q@K sync, just above)
+    // We need V_n in smem before P@V; K_{n+1} can still be in flight.
+    // If last tile: only V_n is outstanding → wait_group 0.
+    // Otherwise:   V_n + K_{n+1} outstanding → wait_group 1 (wait all but 1).
+    if (next_kv_start_early < kv_end) {
       asm volatile("cp.async.wait_group 1;");
     } else {
-      // Last tile: wait for V_n (no K_{n+1}).
       asm volatile("cp.async.wait_group 0;");
     }
     __syncthreads();
@@ -364,45 +397,90 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
         kv_rows_valid, tid);
 #endif
 
+    // Apply correction to persistent o_frags before accumulating P@V.
+    // WMMA m16n16k16 accumulator layout: thread laneId t, element e:
+    //   row = (t/4) + 8*(e/4),   col = (t%4)*2 + (e%2) + 8*((e/2)%2)
+    // Each tile (wi, wj) has:
+    //   elements 0-3 → row wi + laneId/4     (owned by laneId = wi_local + laneId/4)
+    //   elements 4-7 → row wi + laneId/4 + 8 (owned by laneId = wi_local + laneId/4 + 8)
+    // wi_local = wi - warp_id*32 ∈ {0,16} for all configs (invariant for power-of-2 tiling).
+    {
+      const int warp_base = warp_id * 32;
+#pragma unroll
+      for (int i = 0; i < O_TILES_PER_WARP; i++) {
+        int tidx = warp_id * O_TILES_PER_WARP + i;
+        int wi_local = (tidx / O_TILES_PER_ROW) * 16 - warp_base;
+        float corr0 = __shfl_sync(0xffffffff, correction, wi_local + laneId / 4);
+        float corr8 = __shfl_sync(0xffffffff, correction, wi_local + laneId / 4 + 8);
+#pragma unroll
+        for (int e = 0; e < 4; e++) o_frags[i].x[e] *= corr0;
+#pragma unroll
+        for (int e = 4; e < 8; e++) o_frags[i].x[e] *= corr8;
+      }
+    }
+
+    // P @ V — accumulate directly into o_frags (D = A*B + D, no smem_o needed).
     wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> p_frag;
     wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::row_major> v_frag;
-    wmma::fragment<wmma::accumulator, 16, 16, 16, float> o_frag;
 
-    // P @ V — cur_kv now holds V (K was consumed above, V loaded in its place)
+#pragma unroll
     for (int i = 0; i < O_TILES_PER_WARP; i++) {
       int tile_idx = warp_id * O_TILES_PER_WARP + i;
-      int wi = tile_idx / O_TILES_PER_ROW * 16;
-      int wj = tile_idx % O_TILES_PER_ROW * 16;
-
-      wmma::fill_fragment(o_frag, 0.0f);
+      int wi = (tile_idx / O_TILES_PER_ROW) * 16;
+      int wj = (tile_idx % O_TILES_PER_ROW) * 16;
       for (int wk = 0; wk < BLOCK_N; wk += 16) {
         wmma::load_matrix_sync(p_frag, &smem_p[wi * P_STRIDE + wk], P_STRIDE);
         wmma::load_matrix_sync(v_frag, &cur_kv[wk * KV_STRIDE + wj], KV_STRIDE);
-        wmma::mma_sync(o_frag, p_frag, v_frag, o_frag);
+        wmma::mma_sync(o_frags[i], p_frag, v_frag, o_frags[i]);
       }
-      wmma::store_matrix_sync(&smem_o[wi * O_STRIDE + wj], o_frag, O_STRIDE,
-                              wmma::mem_row_major);
     }
 
-    // Required: warps wrote smem_o, all 128 threads now read it.
-    // Also ensures warps' reads of smem_kv (V) finish before next iter's K
-    // load overwrites smem_kv.
+    // Ensure all warps finish reading smem_p and cur_kv (V) before next tile
+    // writes to smem_p (softmax) and cur_kv (next K). No smem_o write needed.
     __syncthreads();
-    for (int i = 0; i < HEAD_DIM; i++) {
-      o_acc[0][i] = o_acc[0][i] * correction + smem_o[tid * O_STRIDE + i];
-    }
   }
 
-  half *smem_out = smem_q;
-  for (int i = 0; i < HEAD_DIM; i++) {
-    smem_out[tid * Q_STRIDE + i] = __float2half(o_acc[0][i] / l_state[0]);
+  // ========================================================================
+  // Epilogue: normalize o_frags by l_state, scatter to smem_q (fp16), write gmem.
+  // ========================================================================
+  // o_frags elements are written to smem_q[global_row * Q_STRIDE + global_col]
+  // using the WMMA accumulator thread-element-to-(row,col) mapping.
+  // smem_q is reused as output staging (Q is no longer needed).
+  static_assert(HEAD_DIM % 8 == 0, "HEAD_DIM must be multiple of 8 for 128-bit stores");
+  {
+    const int warp_base = warp_id * 32;
+    half *smem_out = smem_q;
+#pragma unroll
+    for (int i = 0; i < O_TILES_PER_WARP; i++) {
+      int tidx    = warp_id * O_TILES_PER_WARP + i;
+      int wi      = (tidx / O_TILES_PER_ROW) * 16;
+      int wj      = (tidx % O_TILES_PER_ROW) * 16;
+      int wi_local = wi - warp_base;
+      // Fetch per-row inv_l via warp shuffle (l_state[lane] == l for row 'lane').
+      float inv_l0 = 1.f / __shfl_sync(0xffffffff, l_state, wi_local + laneId / 4);
+      float inv_l8 = 1.f / __shfl_sync(0xffffffff, l_state, wi_local + laneId / 4 + 8);
+#pragma unroll
+      for (int e = 0; e < 8; e++) {
+        // WMMA accumulator layout: row = (laneId/4) + 8*(e/4),
+        //                          col = (laneId%4)*2 + (e%2) + 8*((e/2)%2)
+        int row = wi + (laneId / 4) + 8 * (e / 4);
+        int col = wj + (laneId % 4) * 2 + (e % 2) + 8 * ((e / 2) % 2);
+        float inv_l = (e < 4) ? inv_l0 : inv_l8;
+        smem_out[row * Q_STRIDE + col] = __float2half(o_frags[i].x[e] * inv_l);
+      }
+    }
   }
   __syncthreads();
 
-  constexpr int N_ELEMS = BLOCK_M * HEAD_DIM;
-  for (int idx = tid; idx < N_ELEMS; idx += NTHREADS) {
-    int row = idx / HEAD_DIM;
-    int col = idx % HEAD_DIM;
-    o_ptr[row * params.o_row_stride + col] = smem_out[row * Q_STRIDE + col];
+  // Write output tile to global memory using 128-bit (8 × half) stores.
+  // smem_q is now the normalized fp16 output staging buffer.
+  constexpr int HALVES_PER_STORE = 8;
+  constexpr int N_STORES = BLOCK_M * HEAD_DIM / HALVES_PER_STORE;
+  for (int idx = tid; idx < N_STORES; idx += NTHREADS) {
+    int elem = idx * HALVES_PER_STORE;
+    int row  = elem / HEAD_DIM;
+    int col  = elem % HEAD_DIM;
+    uint4 chunk = *reinterpret_cast<const uint4 *>(&smem_q[row * Q_STRIDE + col]);
+    *reinterpret_cast<uint4 *>(&o_ptr[row * params.o_row_stride + col]) = chunk;
   }
 }

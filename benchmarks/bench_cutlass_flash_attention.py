@@ -51,7 +51,7 @@ def correctness_check(head_dim, seq_len=128):
     max_err = (out - ref).abs().max().item()
     mean_err = (out - ref).abs().mean().item()
     ok = max_err < 0.1  # generous fp16 tolerance
-    status = "✓" if ok else "✗"
+    status = "OK" if ok else "FAIL"
     print(
         f"  [{status}] head_dim={head_dim}, seq={seq_len}: "
         f"max_err={max_err:.4f}, mean_err={mean_err:.4f}"

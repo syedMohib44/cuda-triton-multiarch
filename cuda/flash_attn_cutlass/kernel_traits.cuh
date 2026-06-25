@@ -77,9 +77,15 @@ struct Flash_fwd_kernel_traits {
                             Layout<Shape<Int<kNWarps>, _1, _1>>,
                             Tile<Int<16 * kNWarps>, _16, _16>>;
 
-  // Smem footprint per stage: sQ + sK + sV (sO reuses sQ's space).
+  // Smem footprint: sQ + sK[0] + sK[1] + sV  (sO reuses sQ's space).
+  // Double-buffered K (DualPath): while GEMM(Q, K[i]) runs on tensor cores,
+  // K[i+1] loads into the other buffer via cp.async — two paths simultaneously.
+  // Overhead vs single-K: +1 × kBlockN × kHeadDim × 2 bytes per CTA.
+  //   hdim32 (kBlockN=64): +4 KB  → 16→20 KB   ✓ all SMs
+  //   hdim64 (kBlockN=64): +8 KB  → 32→40 KB   ✓ all SMs
+  //   hdim128(kBlockN=64): +16 KB → 64→80 KB   ✓ SM86+ (100 KB), SM80 (164 KB)
   static constexpr int kSmemSize =
-      sizeof(cute::half_t) * (kBlockM * kHeadDim + 2 * kBlockN * kHeadDim);
+      sizeof(cute::half_t) * (kBlockM * kHeadDim + 3 * kBlockN * kHeadDim);
 };
 
 // Concrete configs (mirror the WMMA version's choices)

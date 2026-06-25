@@ -54,15 +54,15 @@ struct Flash_fwd_kernel_traits {
     static constexpr int kSmemO      = kBlockM * kOStride     * sizeof(float);
     static constexpr int kSmemP      = kBlockM * kPStride     * sizeof(half);
 
-    // scores and O alias the same buffer, so we need max of the two
-    static constexpr int kSmemScoresO = kSmemScores > kSmemO ? kSmemScores : kSmemO;
+    // O is kept in WMMA fragment registers; smem_o is eliminated.
+    // Only scores buffer needed (kSmemScores), saving up to 32 KB for hdim128.
 
     // Without double buffering (SM75 / Phase 1 fallback):
-    static constexpr int kSmemSizeNoPipeline = kSmemQ + kSmemKV + kSmemScoresO + kSmemP;
+    static constexpr int kSmemSizeNoPipeline = kSmemQ + kSmemKV + kSmemScores + kSmemP;
 
     // With double buffering (SM80+ cp.async pipeline):
     // Two KV slots: current tile being consumed + next tile being prefetched.
-    static constexpr int kSmemSizePipeline = kSmemQ + 2 * kSmemKV + kSmemScoresO + kSmemP;
+    static constexpr int kSmemSizePipeline = kSmemQ + 2 * kSmemKV + kSmemScores + kSmemP;
 
     // kSmemSize used by the launch template — pick the right one at compile time.
     // The kernel selects which path to execute via __CUDA_ARCH__.

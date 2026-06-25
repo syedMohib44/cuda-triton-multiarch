@@ -11,9 +11,15 @@ Public API:
     matmul_fp16_triton(x, W)                  tiled fp16 matmul
     matmul_int8_triton(x, W, scale, zp)       int8 dequant matmul
     matmul_int4_triton(x, W, scales, zeros)   int4 dequant matmul
+    KVCachePrefetcher                                async KV offload + prefetch (DualPath-style)
+    is_bandwidth_bound(seqlen, heads, hdim)          True if workload is HBM-bound on current GPU
+    flash_attention_multi_gpu(q, k, v, is_causal)   data-parallel attention across all GPUs
+    MultiGPUAttentionPool                            load-aware GPU dispatcher (DualPath Algorithm 1)
+    num_gpus()                                       number of available CUDA GPUs
+    all_gpu_names()                                  list of GPU names
 
-All functions fall back gracefully: if Triton is unavailable or the tensor
-is on CPU, callers should catch ImportError and fall back to PyTorch.
+All functions fall back gracefully to single-GPU or PyTorch if Triton/CUDA
+extensions are unavailable or tensors are on CPU.
 """
 
 from .softmax import softmax_triton, softmax_pytorch
@@ -30,6 +36,13 @@ from .quantized_matmul import (
     dequantize_int8,
     dequantize_int4,
 )
+from .kv_prefetch import KVCachePrefetcher, is_bandwidth_bound
+from .multi_gpu import (
+    flash_attention_multi_gpu,
+    MultiGPUAttentionPool,
+    num_gpus,
+    all_gpu_names,
+)
 
 __all__ = [
     # softmax
@@ -40,10 +53,15 @@ __all__ = [
     "rmsnorm_pytorch",
     # swiglu
     "swiglu_triton",
-    # flash attention
+    # flash attention — single GPU
     "flash_attention_triton",
     "flash_attention_bhsd",
     "flash_attention_backend",
+    # flash attention — multi GPU
+    "flash_attention_multi_gpu",
+    "MultiGPUAttentionPool",
+    "num_gpus",
+    "all_gpu_names",
     # matmul
     "matmul_fp16_triton",
     "matmul_int8_triton",
@@ -53,4 +71,7 @@ __all__ = [
     "quantize_int4",
     "dequantize_int8",
     "dequantize_int4",
+    # async KV prefetch (DualPath-style)
+    "KVCachePrefetcher",
+    "is_bandwidth_bound",
 ]

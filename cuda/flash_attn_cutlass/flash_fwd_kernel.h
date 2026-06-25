@@ -55,71 +55,58 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
   Tensor gV = local_tile(mV, make_shape(Int<kBlockN>{}, Int<kHeadDim>{}),
                          make_coord(_, 0));
 
-  // smem defs
-  // TODO: fancy cutlass version
-  //   Tensor sA = make_tensor(make_smem_ptr(smem.A.begin()),
-  //                         sA_layout); // (BLK_M,BLK_K,PIPE)
-  // Tensor sB = make_tensor(make_smem_ptr(smem.B.begin()),
-  //                         sB_layout); // (BLK_N,BLK_K,PIPE)
-  // TODO: Q in register; QK temporal smem sharing, validate on block sizes
+  // -----------------------------------------------------------------------
+  // Smem layout — double-buffered K (DualPath-style overlap).
+  // While tensor cores compute GEMM(Q, K[i]), cp.async loads K[i+1] into
+  // the idle buffer — compute and memory run on two concurrent paths.
+  //
+  //   [sQ | sK0 | sK1 | sV]   (sO reuses sQ's space after the KV loop)
+  //
+  // sK0 holds K[even tiles], sK1 holds K[odd tiles].
+  // -----------------------------------------------------------------------
   Tensor sQ = make_tensor(reinterpret_cast<cute::half_t *>(smem),
                           typename Traits::SmemLayoutQ{});
-  Tensor sK =
-      make_tensor(sQ.data() + size(sQ), typename Traits::SmemLayoutKV{});
-  Tensor sV =
-      make_tensor(sK.data() + size(sK), typename Traits::SmemLayoutKV{});
-  Tensor sVt = make_tensor(sV.data(), typename Traits::SmemLayoutVt{});
-  Tensor sVtNoSwizzle =
-      make_tensor(sV.data(), typename Traits::SmemLayoutVtNoSwizzle{});
+  Tensor sK0 = make_tensor(sQ.data()  + size(sQ),  typename Traits::SmemLayoutKV{});
+  Tensor sK1 = make_tensor(sK0.data() + size(sK0), typename Traits::SmemLayoutKV{});
+  Tensor sV  = make_tensor(sK1.data() + size(sK1), typename Traits::SmemLayoutKV{});
+  Tensor sVt          = make_tensor(sV.data(), typename Traits::SmemLayoutVt{});
+  Tensor sVtNoSwizzle = make_tensor(sV.data(), typename Traits::SmemLayoutVtNoSwizzle{});
 
   typename Traits::GmemTiledCopyQKV gmem_tiled_copy_QKV;
   auto gmem_thr_copy_QKV = gmem_tiled_copy_QKV.get_thread_slice(tid);
 
-  Tensor tQgQ = gmem_thr_copy_QKV.partition_S(gQ);
-  Tensor tQsQ = gmem_thr_copy_QKV.partition_D(sQ);
-  Tensor tKgK =
-      gmem_thr_copy_QKV.partition_S(gK); // (KCPY, KCPY_N, KCPY_K, nblocksN)
-  Tensor tKsK = gmem_thr_copy_QKV.partition_D(sK);
-  Tensor tVgV =
-      gmem_thr_copy_QKV.partition_S(gV); // (VCPY, VCPY_N, VCPY_K, nblocksN)
-  Tensor tVsV = gmem_thr_copy_QKV.partition_D(sV);
+  Tensor tQgQ  = gmem_thr_copy_QKV.partition_S(gQ);
+  Tensor tQsQ  = gmem_thr_copy_QKV.partition_D(sQ);
+  Tensor tKgK  = gmem_thr_copy_QKV.partition_S(gK); // (KCPY,KCPY_N,KCPY_K,nblocksN)
+  Tensor tKsK0 = gmem_thr_copy_QKV.partition_D(sK0); // gmem→smem dest for even K tiles
+  Tensor tKsK1 = gmem_thr_copy_QKV.partition_D(sK1); // gmem→smem dest for odd  K tiles
+  Tensor tVgV  = gmem_thr_copy_QKV.partition_S(gV);  // (VCPY,VCPY_N,VCPY_K,nblocksN)
+  Tensor tVsV  = gmem_thr_copy_QKV.partition_D(sV);
 
   typename Traits::TiledMma tiled_mma;
   auto thr_mma = tiled_mma.get_thread_slice(tid);
-  Tensor tSrQ = thr_mma.partition_fragment_A(sQ);
-  Tensor tSrK = thr_mma.partition_fragment_B(sK);
-  Tensor tOrV = thr_mma.partition_fragment_B(sVtNoSwizzle);
+  Tensor tSrQ  = thr_mma.partition_fragment_A(sQ);
+  Tensor tSrK  = thr_mma.partition_fragment_B(sK0); // register buffer, same shape for both bufs
+  Tensor tOrV  = thr_mma.partition_fragment_B(sVtNoSwizzle);
 
   Tensor acc_o = partition_fragment_C(
       tiled_mma, make_shape(Int<kBlockM>{}, Int<kHeadDim>{}));
 
-  // smem to R copy
-  auto smem_tiled_copy_Q =
-      make_tiled_copy_A(typename Traits::SmemCopyAtom{}, tiled_mma);
-  auto smem_tiled_copy_K =
-      make_tiled_copy_B(typename Traits::SmemCopyAtom{}, tiled_mma);
-  // probably need to tranpose here
-  auto smem_tiled_copy_V =
-      make_tiled_copy_B(typename Traits::SmemCopyAtomTransposed{}, tiled_mma);
+  auto smem_tiled_copy_Q = make_tiled_copy_A(typename Traits::SmemCopyAtom{}, tiled_mma);
+  auto smem_tiled_copy_K = make_tiled_copy_B(typename Traits::SmemCopyAtom{}, tiled_mma);
+  auto smem_tiled_copy_V = make_tiled_copy_B(typename Traits::SmemCopyAtomTransposed{}, tiled_mma);
 
   auto smem_thr_copy_Q = smem_tiled_copy_Q.get_thread_slice(tid);
   auto smem_thr_copy_K = smem_tiled_copy_K.get_thread_slice(tid);
   auto smem_thr_copy_V = smem_tiled_copy_V.get_thread_slice(tid);
 
-  // partition smem->register copy
-  auto tSsQ = smem_thr_copy_Q.partition_S(sQ);
-  auto tSsK = smem_thr_copy_K.partition_S(sK);
+  // smem→register read partitions for both K buffers
+  auto tSsQ  = smem_thr_copy_Q.partition_S(sQ);
+  auto tSsK0 = smem_thr_copy_K.partition_S(sK0);
+  auto tSsK1 = smem_thr_copy_K.partition_S(sK1);
   auto tOsVt = smem_thr_copy_V.partition_S(sVt);
 
-  // copy Q
-  // TODO: check if this does load in one go
-  cute::copy(gmem_tiled_copy_QKV, tQgQ, tQsQ);
-  // issue first K copy tile "0"
-  cute::copy(gmem_tiled_copy_QKV, tKgK(_, _, _, _0{}), tKsK);
-  cute::cp_async_fence();
-
   clear(acc_o);
-  // initialize softmax, acc_o: (MMA, MMA_M, MMA_HEAD_DIM)
   // rows is 2*MMA_M dim, 2 rows per thread for each MMA tile
   FLASH::Softmax<2 * size<1>(acc_o)> softmax;
 
@@ -129,28 +116,67 @@ __global__ void flash_fwd_kernel(Flash_fwd_params params) {
       ? cute::ceil_div(min((m_block + 1) * kBlockM, (int)params.seqlen_k), kBlockN)
       : cute::ceil_div(params.seqlen_k, kBlockN);
 
+  // -----------------------------------------------------------------------
+  // Prologue — copy Q + K[0] together (fence group 0), then K[1] if it
+  // exists (fence group 1).  The loop uses cp_async_wait<1> so K[1] can
+  // remain in-flight while the first GEMM(Q, K[0]) executes.
+  // -----------------------------------------------------------------------
+  cute::copy(gmem_tiled_copy_QKV, tQgQ, tQsQ);
+  cute::copy(gmem_tiled_copy_QKV, tKgK(_, _, _, _0{}), tKsK0);
+  cute::cp_async_fence(); // fence group 0: Q + K[0]
+
+  if (nBlocksN > 1) {
+    cute::copy(gmem_tiled_copy_QKV, tKgK(_, _, _, _1{}), tKsK1);
+    cute::cp_async_fence(); // fence group 1: K[1]
+  }
+
 #pragma unroll
   for (int nblock = 0; nblock < nBlocksN; nblock++) {
     Tensor acc_s = partition_fragment_C(
         tiled_mma, make_shape(Int<kBlockM>{}, Int<kBlockN>{}));
     clear(acc_s);
-    // wait on K
-    cute::cp_async_wait<0>();
+
+    // -----------------------------------------------------------------------
+    // Double-buffer K: alternate between sK0 (even) and sK1 (odd).
+    //
+    // Prologue issued K[0]→sK0 (fence 0) and K[1]→sK1 (fence 1, if exists).
+    //
+    //   cp_async_wait<1>  — K[nblock] done, K[nblock+1] may still be loading.
+    //   issue V[nblock]   — V starts loading while K[nblock+1] loads.
+    //   GEMM(Q, K[nblock])— tensor cores run; V and K[nblock+1] load concurrently.
+    //   cp_async_wait<0>  — V done (K[nblock+1] also done).
+    //   issue K[nblock+2] — into the buffer we just freed; loads during P@V GEMM.
+    //   softmax + GEMM(P,V)— tensor cores run; K[nblock+2] loads concurrently.
+    // -----------------------------------------------------------------------
+    const bool is_even_block = (nblock % 2 == 0);
+
+    // Wait for K[nblock]: allow K[nblock+1] to remain in flight (if it exists)
+    if (nblock < nBlocksN - 1) {
+      cute::cp_async_wait<1>(); // K[nblock] done, K[nblock+1] in flight
+    } else {
+      cute::cp_async_wait<0>(); // last tile — wait for everything
+    }
     __syncthreads();
-    // issue V copy
+
+    // Issue V[nblock] — loads concurrently with GEMM(Q, K[nblock]) below
     cute::copy(gmem_tiled_copy_QKV, tVgV(_, _, _, nblock), tVsV);
     cute::cp_async_fence();
 
-    // 1. gemm S=Q@K.T
-    FLASH::gemm(acc_s, tSrQ, tSrK, tSsQ, tSsK, tiled_mma, smem_tiled_copy_Q,
+    // 1. GEMM S = Q @ K[nblock]
+    // Concurrently: V[nblock] and K[nblock+1] are loading via cp.async.
+    auto &tSsK_cur = is_even_block ? tSsK0 : tSsK1;
+    FLASH::gemm(acc_s, tSrQ, tSrK, tSsQ, tSsK_cur, tiled_mma, smem_tiled_copy_Q,
                 smem_tiled_copy_K, smem_thr_copy_Q, smem_thr_copy_K);
-    // wait for V
+
+    // Wait for V[nblock] — cp_async_wait<0> also ensures K[nblock+1] is done.
     cute::cp_async_wait<0>();
     __syncthreads();
 
-    // next K block prefetch (only if there is one)
-    if (nblock < nBlocksN - 1) {
-      cute::copy(gmem_tiled_copy_QKV, tKgK(_, _, _, nblock + 1), tKsK);
+    // Issue K[nblock+2] into the buffer we just finished reading from.
+    // It will load concurrently with softmax + GEMM(P, V) below.
+    if (nblock + 2 < nBlocksN) {
+      auto &tKsK_next = is_even_block ? tKsK0 : tKsK1; // reuse freed buffer
+      cute::copy(gmem_tiled_copy_QKV, tKgK(_, _, _, nblock + 2), tKsK_next);
       cute::cp_async_fence();
     }
 
