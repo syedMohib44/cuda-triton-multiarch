@@ -173,8 +173,13 @@ if COMPILE_CUDA:
         cmdclass["build_ext"] = BuildExtension.with_options(no_python_abi_suffix=False)
 
     except Exception as exc:
-        print(f"[cuda-triton] WARNING: Could not set up CUDA extensions: {exc}",
-              file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        msg = f"[cuda-triton] Could not set up CUDA extensions: {exc}"
+        if CUDA_REQUIRED:
+            print(f"ERROR: {msg}", file=sys.stderr)
+            sys.exit(1)
+        print(f"WARNING: {msg}", file=sys.stderr)
         ext_modules = []
         cmdclass = {}
 
