@@ -84,8 +84,9 @@ jobs:
           TORCH_CUDA_ARCH_LIST: "7.5 8.0 8.6 8.9 9.0"
           MAX_JOBS: "4"
           CUDA_BUILD_REQUIRED: "1"
+          VERBOSE: "1"
         # --no-build-isolation: reuse the current env (torch already installed above)
-        run: pip wheel . --no-deps --no-build-isolation -w dist/
+        run: pip wheel . --no-deps --no-build-isolation -w dist/ 2>&1 | tee build.log; exit ${PIPESTATUS[0]}
 
       - name: Build wheel (Windows)
         if: runner.os == 'Windows'
