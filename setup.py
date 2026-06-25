@@ -141,7 +141,6 @@ if COMPILE_CUDA:
 
         # ---- CUTLASS extension ---------------------------------------------
         if _ensure_cutlass():
-            cutlass_rel   = os.path.relpath(CUTLASS_DIR, HERE)
             ext_modules.append(
                 CUDAExtension(
                     "kernels.flash_attn_cutlass",
@@ -155,8 +154,8 @@ if COMPILE_CUDA:
                         "cuda/flash_attn_cutlass/flash_fwd_hdim128_fp16_causal_sm80.cu",
                     ],
                     include_dirs=[
-                        os.path.join(cutlass_rel, "include"),
-                        os.path.join(cutlass_rel, "tools", "util", "include"),
+                        os.path.join(CUTLASS_DIR, "include"),
+                        os.path.join(CUTLASS_DIR, "tools", "util", "include"),
                     ],
                     extra_compile_args={
                         "nvcc": ["-O3", "--use_fast_math", *cpp_std,
