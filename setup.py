@@ -28,30 +28,35 @@ KERNELS_DIR = os.path.join(HERE, "kernels")
 # ---------------------------------------------------------------------------
 # Decide whether to build CUDA extensions
 # ---------------------------------------------------------------------------
-SKIP_CUDA = os.environ.get("SKIP_CUDA_BUILD", "0").strip() == "1"
-HAS_NVCC  = shutil.which("nvcc") is not None
+SKIP_CUDA      = os.environ.get("SKIP_CUDA_BUILD",    "0").strip() == "1"
+CUDA_REQUIRED  = os.environ.get("CUDA_BUILD_REQUIRED", "0").strip() == "1"
+HAS_NVCC       = shutil.which("nvcc") is not None
 
 # On Windows also need MSVC (cl.exe)
 HAS_MSVC = True
 if sys.platform == "win32":
     HAS_MSVC = shutil.which("cl") is not None
     if not HAS_MSVC:
-        print(
-            "[cuda-triton] WARNING: cl.exe (MSVC) not found in PATH. "
-            "CUDA extensions will not be compiled. "
-            "Run from an 'x64 Native Tools Command Prompt' to enable them.",
-            file=sys.stderr,
+        msg = (
+            "[cuda-triton] cl.exe (MSVC) not found in PATH. "
+            "Run from an 'x64 Native Tools Command Prompt' to enable CUDA extensions."
         )
+        if CUDA_REQUIRED:
+            print(msg, file=sys.stderr)
+            sys.exit(1)
+        print("WARNING: " + msg, file=sys.stderr)
 
 COMPILE_CUDA = HAS_NVCC and HAS_MSVC and not SKIP_CUDA
 
 if not HAS_NVCC and not SKIP_CUDA:
-    print(
-        "[cuda-triton] nvcc not found — installing without CUDA extensions. "
-        "Triton JIT kernels (softmax, flash attention, matmul) will still work. "
-        "Install the CUDA Toolkit and reinstall to enable WMMA/CUTLASS backends.",
-        file=sys.stderr,
+    msg = (
+        "[cuda-triton] nvcc not found — CUDA extensions will not be compiled. "
+        "Triton JIT kernels still work. Install CUDA Toolkit to enable WMMA/CUTLASS."
     )
+    if CUDA_REQUIRED:
+        print(msg, file=sys.stderr)
+        sys.exit(1)
+    print(msg, file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
