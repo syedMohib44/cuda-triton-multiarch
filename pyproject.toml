@@ -22,6 +22,9 @@ dev = [
     "ninja>=1.10",
 ]
 
+[project.scripts]
+build-cuda-kernels = "kernels.build_extensions:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["kernels*", "cuda*"]

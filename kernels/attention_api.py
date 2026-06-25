@@ -12,18 +12,29 @@ Backend priority:
   4. F.scaled_dot_product_attention                 — CPU / bf16 / fp32 fallback
 """
 
+import importlib.util
+import sys
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-# WMMA CUDA backend (built via: powershell -File Makefile.windows.ps1 build-fac)
+# Ensure the kernels/ package directory is in sys.path so that .pyd/.so files
+# copied there by `build-cuda-kernels` are importable as top-level modules.
+_spec = importlib.util.find_spec("kernels")
+if _spec and _spec.submodule_search_locations:
+    for _p in _spec.submodule_search_locations:
+        if _p not in sys.path:
+            sys.path.insert(0, _p)
+
+# WMMA CUDA backend (built via: build-cuda-kernels --wmma-only)
 try:
     import flash_attn_cuda as _wmma
     _WMMA_AVAILABLE = True
 except ImportError:
     _WMMA_AVAILABLE = False
 
-# CuTe/CUTLASS backend (built via: powershell -File Makefile.windows.ps1 build-fac-cutlass)
+# CuTe/CUTLASS backend (built via: build-cuda-kernels --cutlass-only)
 try:
     import flash_attn_cutlass as _cutlass
     _CUTLASS_AVAILABLE = True
