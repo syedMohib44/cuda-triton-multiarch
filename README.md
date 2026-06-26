@@ -1,11 +1,3 @@
-# Check before running
-uname -a
-which nvcc && nvcc --version
-echo "CUDA_HOME=$CUDA_HOME"
-python --version
-which python
-
-
 # Triton + CUDA GPU Kernels
 
 Triton and CUDA kernels for transformer operations — RMSNorm, SwiGLU, softmax, FlashAttention-2, fp16 / int8 / int4 matmul — with PyTorch reference implementations, parametrized correctness tests, and multi-GPU benchmarks.
@@ -215,29 +207,29 @@ CUDA kernels expect `(B, T, H, d)` internally; the adapter transposes automatica
 
 ## Publishing to PyPI
 
-Pre-built wheels on PyPI let users `pip install cuda-triton-multiarch` and get the WMMA + CUTLASS CUDA extensions without building from source. Wheels are platform-specific (`cp312-cp312-win_amd64`, `cp312-cp312-linux_x86_64`, etc.) and must be built on each target platform.
+Pre-built wheels on PyPI let users `pip install cuda-triton-multiarch` and get the WMMA + CUTLASS CUDA extensions without building from source. Wheels are platform-specific (`cp313-cp313-win_amd64`, `cp312-cp312-linux_x86_64`, etc.) and must be built on each target platform.
 
 ### Prerequisites
 
 | Requirement | Windows | Linux / WSL2 | macOS (CPU-only) |
 |---|---|---|---|
 | Python 3.10–3.13 | ✓ | ✓ | ✓ |
-| PyTorch (cu124 or cu128) | ✓ | ✓ | — |
-| CUDA Toolkit (nvcc) | ✓ | ✓ | — |
+| PyTorch with CUDA (cu124 / cu128) | ✓ | ✓ | — |
+| CUDA Toolkit 12.x / 13.x (nvcc) | ✓ | ✓ | — |
 | Visual Studio Build Tools 2022 | ✓ | — | — |
 | GCC / build-essential | — | ✓ | — |
 | Xcode Command Line Tools | — | — | ✓ |
-| `pip install twine build` | ✓ | ✓ | ✓ |
+| `pip install twine` | ✓ | ✓ | ✓ |
 
-> **macOS:** CUDA is not supported on macOS. The wheel will be a pure-Python fallback (`py3-none-any`) — Triton and PyTorch SDPA backends still work. Skip the CUDA build steps.
+> **macOS:** CUDA is not supported on macOS. The wheel will be a pure-Python fallback (`py3-none-any`) — Triton and PyTorch SDPA backends still work.
 
 ---
 
 ### Step 1 — One-time PyPI setup
 
-1. Create an account at [pypi.org](https://pypi.org) if you don't have one.
+1. Create an account at [pypi.org](https://pypi.org).
 2. Go to **Account Settings → API tokens → Add API token**, scope it to `cuda-triton-multiarch`.
-3. Save the token. Create `~/.pypirc` (or `%USERPROFILE%\.pypirc` on Windows):
+3. Save the token. Create `~/.pypirc` (Windows: `%USERPROFILE%\.pypirc`):
 
 ```ini
 [pypi]
@@ -245,128 +237,210 @@ username = __token__
 password = pypi-AgAAA...your-token-here...
 ```
 
-Or pass credentials interactively — twine will prompt if `.pypirc` is absent.
+---
+
+### Step 2 — Install CUDA-enabled PyTorch
+
+**Always install CUDA torch before building** — if pip resolves torch from PyPI it will pull the CPU-only build and CUDA extensions will fail to link.
+
+```bash
+# CUDA 12.8
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+
+# CUDA 12.4
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+```
+
+Verify:
+```python
+python -c "import torch; print(torch.version.cuda, torch.cuda.is_available())"
+# 12.8  True
+```
 
 ---
 
-### Step 2 — Build the wheel
+### Step 3 — Build the wheel
 
-#### Windows (x64 Native Tools Command Prompt)
+#### Windows
 
-Open **x64 Native Tools Command Prompt for VS 2022** (not a regular terminal — this puts `cl.exe` on PATH), then:
+> **Critical:** `cl.exe` (MSVC) must be on PATH before building. The easiest way is to use the included `build_wheel.bat` — it calls `vcvars64.bat` automatically.
 
 ```cmd
-conda activate torch_cuda13
+cd D:\cuda-triton
+build_wheel.bat
+```
 
-cd /d D:\cuda-triton
+Alternatively, open an **x64 Native Tools Command Prompt for VS 2022** and run:
 
-set TORCH_CUDA_ARCH_LIST=7.5 8.0 8.6 8.9 9.0 12.0
-set MAX_JOBS=4
-
-pip wheel . --no-deps --no-build-isolation -w dist/
+```cmd
+cd D:\cuda-triton
+set DISTUTILS_USE_SDK=1
+set MSSdk=1
+python setup.py bdist_wheel --dist-dir dist/
 ```
 
 Expected output:
 ```
-Successfully built cuda-triton-multiarch
-  filename=cuda_triton_multiarch-0.2.x-cp312-cp312-win_amd64.whl  size=~13 MB
+[cuda-triton] WMMA extension queued for build.
+[cuda-triton] CUTLASS extension queued for build.
+...
+creating 'dist/cuda_triton_multiarch-0.2.2-cp313-cp313-win_amd64.whl'  (~2.5 MB)
 ```
+
+> **Why `setup.py` instead of `pip wheel`?**
+> `pip wheel` runs the build in a subprocess that does not inherit shell environment variables (`CUDA_HOME`, `cl.exe` PATH). `setup.py bdist_wheel` runs in the current process and picks up the MSVC environment initialized by `vcvars64.bat`.
+
+---
 
 #### Linux / WSL2
 
 ```bash
-conda activate torch_cuda13
 cd ~/cuda-triton
-
-export TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9 9.0"
+export TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9 9.0"   # add 12.0 for Blackwell (requires CUDA 12.8+)
 export MAX_JOBS=4
 
-pip wheel . --no-deps --no-build-isolation -w dist/
+python setup.py bdist_wheel --dist-dir dist/
 ```
 
-> **Note:** SM120 (Blackwell) requires CUDA 12.8+. If your toolkit is 12.4–12.7, omit `12.0` from `TORCH_CUDA_ARCH_LIST`. Blackwell GPUs get PTX JIT from SM90 which works correctly at runtime.
+Expected output:
+```
+creating 'dist/cuda_triton_multiarch-0.2.2-cp312-cp312-linux_x86_64.whl'  (~13 MB)
+```
+
+---
 
 #### macOS (CPU-only / fallback wheel)
 
 ```bash
 cd ~/cuda-triton
-pip wheel . --no-deps -w dist/
+python setup.py bdist_wheel --dist-dir dist/
 ```
 
-This produces a `py3-none-any` wheel with Triton and PyTorch backends only (no CUDA extensions).
+Produces a `py3-none-any` wheel (~50 KB) with Triton JIT and PyTorch SDPA backends. No CUDA extensions.
 
 ---
 
-### Step 3 — Verify the wheel
+### Step 4 — Verify the wheel contains CUDA extensions
 
 ```bash
-# Inspect contents
-pip show --files cuda-triton-multiarch   # after install
-# or
-python -c "import zipfile, sys; z=zipfile.ZipFile(sys.argv[1]); [print(n) for n in z.namelist() if '.pyd' in n or '.so' in n]" dist/cuda_triton_multiarch-*.whl
+python -c "
+import zipfile, sys, glob
+whl = glob.glob('dist/cuda_triton_multiarch-*.whl')[0]
+print('Wheel:', whl)
+z = zipfile.ZipFile(whl)
+exts = [n for n in z.namelist() if n.endswith(('.pyd', '.so'))]
+print('Extensions:', exts if exts else 'NONE — CPU-only wheel')
+"
 ```
 
-You should see `kernels/flash_attn_cuda.*.pyd` and `kernels/flash_attn_cutlass.*.pyd` (or `.so` on Linux) — these confirm the CUDA extensions are bundled.
+Expected on Windows (CUDA build):
+```
+Wheel: dist/cuda_triton_multiarch-0.2.2-cp313-cp313-win_amd64.whl
+Extensions: ['kernels/flash_attn_cuda.cp313-win_amd64.pyd',
+             'kernels/flash_attn_cutlass.cp313-win_amd64.pyd']
+```
+
+If `Extensions: NONE` — `cl.exe` was not on PATH during build. Re-run from `build_wheel.bat` or the x64 Native Tools prompt.
 
 ---
 
-### Step 4 — Upload to PyPI
+### Step 5 — Upload to PyPI
 
 ```bash
 pip install twine
 
-# Upload a specific wheel
-twine upload dist/cuda_triton_multiarch-0.2.x-cp312-cp312-win_amd64.whl
+# Upload a single wheel
+twine upload dist/cuda_triton_multiarch-0.2.2-cp313-cp313-win_amd64.whl
 
-# Or upload everything in dist/ at once
-twine upload dist/cuda_triton_multiarch-0.2.x-*.whl
+# Upload everything in dist/ at once
+twine upload dist/cuda_triton_multiarch-0.2.2-*.whl
 ```
 
-#### Uploading wheels from multiple platforms
-
-Each platform (Windows, Linux, Python version) produces a separate wheel. Collect them all before uploading to give users the best experience:
+Collect wheels from all platforms before uploading to give users the best experience:
 
 ```
 dist/
-  cuda_triton_multiarch-0.2.x-cp310-cp310-win_amd64.whl
-  cuda_triton_multiarch-0.2.x-cp311-cp311-win_amd64.whl
-  cuda_triton_multiarch-0.2.x-cp312-cp312-win_amd64.whl
-  cuda_triton_multiarch-0.2.x-cp313-cp313-win_amd64.whl
-  cuda_triton_multiarch-0.2.x-cp310-cp310-linux_x86_64.whl
-  cuda_triton_multiarch-0.2.x-cp311-cp311-linux_x86_64.whl
-  cuda_triton_multiarch-0.2.x-cp312-cp312-linux_x86_64.whl
-  cuda_triton_multiarch-0.2.x-cp313-cp313-linux_x86_64.whl
+  cuda_triton_multiarch-0.2.2-cp313-cp313-win_amd64.whl      # Windows py3.13
+  cuda_triton_multiarch-0.2.2-cp312-cp312-win_amd64.whl      # Windows py3.12
+  cuda_triton_multiarch-0.2.2-cp312-cp312-linux_x86_64.whl   # Linux py3.12
+  cuda_triton_multiarch-0.2.2-cp313-cp313-linux_x86_64.whl   # Linux py3.13
+  cuda_triton_multiarch-0.2.2-py3-none-any.whl               # macOS / CPU fallback
 ```
 
 Then upload all at once:
-
 ```bash
-twine upload dist/cuda_triton_multiarch-0.2.x-*.whl
+twine upload dist/cuda_triton_multiarch-0.2.2-*.whl
 ```
 
-`skip-existing: true` is set in the CI config so re-uploading an already-published filename is safe (it's silently skipped).
+`skip-existing: true` is set in the CI config so re-uploading an already-published filename is silently skipped.
 
 ---
 
-### Step 5 — Verify the published package
+### Step 6 — Install and test from PyPI
 
 ```bash
-pip install cuda-triton-multiarch==0.2.x --upgrade --no-cache-dir
-python -c "from kernels import flash_attention_bhsd, flash_attention_backend; print(flash_attention_backend())"
-# → flash_attn_cuda (WMMA)        ← CUDA build included
-# → flash_attention_triton (Triton) ← fallback wheel
+# Install CUDA torch first (prevents pip pulling CPU torch as a dependency)
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+
+# Install the package without letting pip re-resolve torch
+pip install cuda-triton-multiarch --no-deps
+pip install triton-windows    # Windows only; Linux/macOS: pip install triton
 ```
+
+Test (run from **any directory except the repo root** — the local `kernels/` folder shadows the installed package if you're inside `d:\cuda-triton`):
+
+```python
+import os, sys, torch
+
+# Windows only: register CUDA DLL search paths
+if sys.platform == "win32":
+    env = os.path.dirname(os.path.dirname(sys.executable))  # conda env root
+    for d in [os.path.join(env, "Library", "bin"),
+              os.path.join(env, "Library", "bin", "x64"),
+              os.path.join(os.path.dirname(torch.__file__), "lib")]:
+        if os.path.isdir(d):
+            os.add_dll_directory(d)
+
+from kernels import flash_attention_backend, flash_attention_bhsd, softmax_triton
+
+print("Backend:", flash_attention_backend())
+# → flash_attn_cuda (WMMA)           ← CUDA wheel, WMMA backend
+# → flash_attn_cutlass (CuTe)        ← CUDA wheel, CUTLASS backend
+# → flash_attention_triton (Triton)  ← CPU-only / fallback wheel
+# → scaled_dot_product_attention     ← no Triton, pure PyTorch
+
+# Flash attention
+q = torch.randn(2, 8, 64, 64, dtype=torch.float16, device="cuda")
+out = flash_attention_bhsd(q, q.clone(), q.clone(), is_causal=True)
+assert out.shape == q.shape
+print("FA output shape:", out.shape)   # torch.Size([2, 8, 64, 64])
+
+# Softmax
+s = softmax_triton(torch.randn(128, 256, device="cuda"))
+print("Softmax row sum:", round(s[0].sum().item(), 4))  # 1.0
+```
+
+---
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Wheel is `py3-none-any` (50 KB) | `cl.exe` not on PATH (Windows) | Run `build_wheel.bat` or open x64 Native Tools prompt |
+| `DLL load failed` when importing | CUDA DLLs not registered on Windows | Add `os.add_dll_directory` calls above before any import |
+| Backend shows `flash_attention_triton` after install | Running from `d:\cuda-triton` (local dir shadows install) | `cd` to a different directory first |
+| `torch.version.cuda: None` after install | pip replaced CUDA torch with CPU torch | Reinstall: `pip install torch --index-url .../cu128 --force-reinstall` |
+| `LNK2001: unresolved external symbol c10::cuda` | torch in env is CPU-only at build time | Install CUDA torch **before** running `build_wheel.bat` |
 
 ---
 
 ### Version bump checklist
 
-Before publishing a new version:
-
 1. Bump `version` in [pyproject.toml](pyproject.toml)
-2. Build wheels on each platform (Steps 2–3 above)
-3. Upload with twine (Step 4)
-4. Tag the commit: `git tag v0.x.y && git push origin v0.x.y`
+2. Delete `dist/`, `build/`, `*.egg-info/`
+3. Build wheels on each platform (Steps 3–4 above)
+4. Upload with twine (Step 5)
+5. Commit and tag: `git tag v0.x.y && git push origin v0.x.y`
 
 The GitHub Actions CI (`.github/workflows/publish.yml`) also builds and publishes automatically when a `v*` tag is pushed — it covers Linux + Windows × Python 3.10–3.13. Use the local build flow above when you need to publish immediately or debug CI failures.
 
