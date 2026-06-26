@@ -32,6 +32,17 @@ SKIP_CUDA      = os.environ.get("SKIP_CUDA_BUILD",    "0").strip() == "1"
 CUDA_REQUIRED  = os.environ.get("CUDA_BUILD_REQUIRED", "0").strip() == "1"
 HAS_NVCC       = shutil.which("nvcc") is not None
 
+# Auto-derive CUDA_HOME from nvcc location if not already set.
+# torch.utils.cpp_extension requires CUDA_HOME; conda environments often place
+# nvcc in <env>/Library/bin/nvcc.exe without setting CUDA_HOME automatically.
+if HAS_NVCC and not os.environ.get("CUDA_HOME") and not os.environ.get("CUDA_PATH"):
+    _nvcc = shutil.which("nvcc")
+    # nvcc lives at <cuda_root>/bin/nvcc.exe → go up two levels
+    _cuda_root = os.path.dirname(os.path.dirname(_nvcc))
+    os.environ["CUDA_HOME"] = _cuda_root
+    os.environ["CUDA_PATH"] = _cuda_root
+    print(f"[cuda-triton] Auto-set CUDA_HOME={_cuda_root}")
+
 # On Windows also need MSVC (cl.exe)
 HAS_MSVC = True
 if sys.platform == "win32":
@@ -104,6 +115,16 @@ cmdclass = {}
 if COMPILE_CUDA:
     try:
         from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+        import torch.utils.cpp_extension as _torch_ext
+
+        # torch 2.x caches CUDA_HOME at import time; if it resolved to None
+        # (e.g. conda env where CUDA_HOME points to Library/ not a standard install),
+        # patch it directly so CUDAExtension / library_paths() can find the libs.
+        if _torch_ext.CUDA_HOME is None:
+            _nvcc = shutil.which("nvcc")
+            if _nvcc:
+                _torch_ext.CUDA_HOME = os.path.dirname(os.path.dirname(_nvcc))
+                print(f"[cuda-triton] Patched torch CUDA_HOME={_torch_ext.CUDA_HOME}")
 
         sys.path.insert(0, os.path.join(HERE, "cuda"))
         from arch_utils import get_gencode_flags
@@ -172,6 +193,23 @@ if COMPILE_CUDA:
             print("[cuda-triton] CUTLASS headers unavailable — skipping CuTe backend.")
 
         cmdclass["build_ext"] = BuildExtension.with_options(no_python_abi_suffix=False)
+
+        # torch 2.12+ merged c10_cuda and torch_cuda into c10/torch.
+        # On Windows, CUDAExtension still injects the old lib names which no
+        # longer have corresponding .lib files — strip any that are missing.
+        if sys.platform == "win32":
+            import torch as _torch
+            _torch_lib = os.path.join(os.path.dirname(_torch.__file__), "lib")
+            for _ext in ext_modules:
+                _before = list(_ext.libraries)
+                _ext.libraries = [
+                    lib for lib in _ext.libraries
+                    if not lib.startswith(("c10_cuda", "torch_cuda"))
+                    or os.path.exists(os.path.join(_torch_lib, lib + ".lib"))
+                ]
+                _removed = set(_before) - set(_ext.libraries)
+                if _removed:
+                    print(f"[cuda-triton] Stripped missing libs from {_ext.name}: {_removed}")
 
     except Exception as exc:
         import traceback

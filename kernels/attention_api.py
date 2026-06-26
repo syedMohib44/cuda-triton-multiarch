@@ -13,14 +13,28 @@ Backend priority:
 """
 
 import importlib.util
+import os
 import sys
 
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+# On Windows, CUDA DLLs may live in a non-standard subdirectory (e.g. Library\bin\x64\)
+# that is not on PATH by default. Register every candidate before loading .pyd extensions.
+if sys.platform == "win32":
+    import sysconfig
+    _conda_base = os.path.dirname(sysconfig.get_path("scripts"))  # env root
+    for _candidate in [
+        os.path.join(_conda_base, "Library", "bin"),
+        os.path.join(_conda_base, "Library", "bin", "x64"),
+        os.path.join(os.path.dirname(torch.__file__), "lib"),
+    ]:
+        if os.path.isdir(_candidate):
+            os.add_dll_directory(_candidate)
+
 # Ensure the kernels/ package directory is in sys.path so that .pyd/.so files
-# copied there by `build-cuda-kernels` are importable as top-level modules.
+# installed by the wheel are importable as top-level modules.
 _spec = importlib.util.find_spec("kernels")
 if _spec and _spec.submodule_search_locations:
     for _p in _spec.submodule_search_locations:
